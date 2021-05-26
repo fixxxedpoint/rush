@@ -15,7 +15,9 @@ use futures::{
 use std::{
     cell::Cell,
     collections::{hash_map::DefaultHasher, HashMap},
+    fs::File,
     hash::Hasher as StdHasher,
+    io::{BufWriter, Write},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -240,34 +242,30 @@ struct Peer {
 }
 
 #[derive(Clone)]
-pub(crate) struct UnreliableRouter {
-    peers: Arc<Mutex<HashMap<NodeIndex, Peer>>>,
-    peer_list: Arc<Mutex<Vec<NodeIndex>>>,
-    hook_list: Arc<Mutex<Vec<Box<dyn NetworkHook + Send>>>>,
+pub(crate) struct UnreliableRouter<Hook> {
+    peers: HashMap<NodeIndex, Peer>,
+    peer_list: Vec<NodeIndex>,
+    hook: Hook,
     reliability: f64, //a number in the range [0, 1], 1.0 means perfect reliability, 0.0 means no message gets through
 }
 
-impl UnreliableRouter {
-    pub(crate) fn new(peer_list: Vec<NodeIndex>, reliability: f64) -> Self {
-        UnreliableRouter {
-            peers: Arc::new(Mutex::new(HashMap::new())),
-            peer_list: Arc::new(Mutex::new(peer_list)),
-            hook_list: Arc::new(Mutex::new(Vec::new())),
+impl<Hook: NetworkHook> UnreliabeRouter<Hook> {
+    pub(crate) fn new(peer_list: Vec<NodeIndex>, reliability: f64, hook: Hook) -> Self {
+        NetworkHub {
+            peers: HashMap::new(),
+            peer_list,
+            hook,
             reliability,
         }
     }
 
-    pub(crate) fn add_hook<HK: NetworkHook + Send + Clone + 'static>(&self, hook: HK) {
-        self.hook_list.lock().push(Box::new(hook));
-    }
-
-    pub(crate) fn connect_peer(&self, peer: NodeIndex) -> Network {
+    pub(crate) fn connect_peer(&mut self, peer: PeerId) -> Network {
         assert!(
-            self.peer_list.lock().iter().any(|p| *p == peer),
+            self.peer_list.iter().any(|p| *p == peer),
             "Must connect a peer in the list."
         );
         assert!(
-            !self.peers.lock().contains_key(&peer),
+            !self.peers.contains_key(&peer),
             "Cannot connect a peer twice."
         );
         let (tx_in_hub, rx_in_hub) = unbounded();
@@ -276,64 +274,69 @@ impl UnreliableRouter {
             tx: tx_out_hub,
             rx: rx_in_hub,
         };
-        self.peers.lock().insert(peer, peer_entry);
+        self.peers.insert(peer.clone(), peer_entry);
         Network {
             rx: rx_out_hub,
             tx: tx_in_hub,
-            peers: self.peer_list.lock().clone(),
-            index: peer,
+            peer_list: self.peer_list.clone(),
+            my_peer_id: peer,
         }
     }
-}
 
-impl Future for UnreliableRouter {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut disconnected_peers: Vec<NodeIndex> = Vec::new();
+    pub(crate) async fn run(&mut self) {
+        let mut disconnected_peers = Vec::new();
         let mut buffer = Vec::new();
-        for (peer_id, peer) in self.peers.lock().iter_mut() {
-            loop {
-                match peer.rx.poll_next_unpin(cx) {
-                    Poll::Ready(Some(msg)) => {
-                        buffer.push((*peer_id, msg));
-                    }
-                    Poll::Ready(None) => {
-                        disconnected_peers.push(*peer_id);
-                        break;
-                    }
-                    Poll::Pending => {
-                        break;
+        while !self.peers.is_empty() {
+            for (peer_id, peer) in self.peers.iter_mut() {
+                loop {
+                    let next = peer.rx.try_next();
+                    match next {
+                        Ok(Some(msg)) => buffer.push(msg),
+                        Ok(None) => {
+                            disconnected_peers.push(peer_id.clone());
+                            break;
+                        }
+                        Err(_) => {}
                     }
                 }
             }
-        }
-        for peer_id in disconnected_peers {
-            self.peers.lock().remove(&peer_id);
-        }
-        for (sender, (data, recipient)) in buffer {
-            let rand_sample = rand::random::<f64>();
-            if rand_sample > self.reliability {
-                debug!("Simulated network fail.");
-                continue;
+            for peer_id in disconnected_peers.drain(..) {
+                self.peers.remove(&peer_id);
             }
-            let mut peers = self.peers.lock();
-            if let Some(peer) = peers.get_mut(&recipient) {
-                let hooks = self.hook_list.lock();
-                for hook in hooks.iter() {
-                    hook.update_state(data.clone(), sender, recipient);
+            for addr_msg in buffer.drain(..) {
+                let rand_sample = rand::random::<f64>();
+                if rand_sample > self.reliability {
+                    debug!("Simulated network fail.");
+                    continue;
+                }
+                if let Some(peer) = self.peers.get_mut(&addr_msg.receiver.clone()) {
+                    self.hook.update_state(addr_msg.clone());
+                    if let Err(e) = peer.tx.unbounded_send(addr_msg) {
+                        error!(target: "network-hub", "Error when routing message via hub {:?}.", e);
+                    }
                 }
                 peer.tx
                     .unbounded_send((data, sender))
                     .expect("channel should be open");
             }
         }
-
-        Poll::Pending
     }
 }
 
 pub(crate) trait NetworkHook: Send {
-    fn update_state(&self, data: NetworkData, sender: NodeIndex, recipient: NodeIndex);
+    fn update_state(&mut self, data: NetworkData, sender: NodeIndex, recipient: NodeIndex);
+}
+
+pub(crate) struct NoOpHook(());
+
+impl NoOpHook {
+    pub(crate) fn new() -> NoOpHook {
+        NoOpHook(())
+    }
+}
+
+impl NetworkHook for NoOpHook {
+    fn update_state(&mut self, _: NetworkData, _: NodeIndex, _: NodeIndex) {}
 }
 
 #[derive(Clone)]
@@ -360,6 +363,27 @@ impl NetworkHook for AlertHook {
             let mut alert_count = self.alert_count.lock();
             *alert_count += 1;
         }
+    }
+}
+
+pub(crate) struct EvesDroppingHook<S> {
+    sink: S,
+}
+
+impl EvesDroppingHook<BufWriter<File>> {
+    fn new(file: File) -> EvesDroppingHook<BufWriter<File>> {
+        let buffered_file = BufWriter::new(file);
+        EvesDroppingHook {
+            sink: buffered_file,
+        }
+    }
+}
+
+impl<S: Write + Send> NetworkHook for EvesDroppingHook<S> {
+    fn update_state(&mut self, msg: AddressedMessage) {
+        self.sink
+            .write_all(&msg.message[..])
+            .expect("error while evesdropping network communication");
     }
 }
 
@@ -450,10 +474,11 @@ pub(crate) type HonestMember<'a> = Member<'a, Hasher64, Data, DataIO, KeyBox>;
 pub(crate) fn configure_network(
     n_members: usize,
     reliability: f64,
+    hook: impl NetworkHook,
 ) -> (UnreliableRouter, Vec<Option<Network>>) {
     let peer_list = (0..n_members).map(NodeIndex).collect();
 
-    let router = UnreliableRouter::new(peer_list, reliability);
+    let router = UnreliableRouter::new(peer_list, reliability, hook);
     let mut networks = Vec::new();
     for ix in 0..n_members {
         let network = router.connect_peer(NodeIndex(ix));

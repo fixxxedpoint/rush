@@ -221,12 +221,11 @@ async fn honest_members_agree_on_batches_byzantine(
     let spawner = Spawner::new();
     let mut exits = vec![];
     let mut batch_rxs = Vec::new();
-    let (net_hub, mut networks) = configure_network(n_members, network_reliability);
-
     let alert_hook = AlertHook::new();
-    net_hub.add_hook(alert_hook.clone());
+    let (mut net_hub, mut networks) =
+        configure_network(n_members, network_reliability, alert_hook.clone());
 
-    spawner.spawn("network-hub", net_hub);
+    spawner.spawn("network-hub", async move { net_hub.run().await });
 
     for (ix, network) in networks.iter_mut().enumerate() {
         if ix >= n_honest {
