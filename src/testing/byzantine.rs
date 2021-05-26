@@ -214,23 +214,26 @@ async fn honest_members_agree_on_batches_byzantine(
 ) {
     init_log();
     let spawner = Spawner::new();
+    let mut batch_rxs = vec![];
     let mut exits = vec![];
-    let mut batch_rxs = Vec::new();
-    let (net_hub, mut networks) = configure_network(n_members, network_reliability);
+    let (mut net_hub, networks) = configure_network(
+        n_members,
+        network_reliability,
+        (0..n_members).map(NodeIndex),
+    );
 
     let alert_hook = AlertHook::new();
     net_hub.add_hook(alert_hook.clone());
 
-    spawner.spawn("network-hub", net_hub);
+    spawner.spawn("network-hub", async move { net_hub.run().await });
 
-    for (ix, network) in networks.iter_mut().enumerate() {
+    for network in networks {
+        let ix = network.index.into();
         if ix >= n_honest {
-            let exit_tx =
-                spawn_malicious_member(spawner.clone(), ix, n_members, 2, network.take().unwrap());
+            let exit_tx = spawn_malicious_member(spawner.clone(), ix, n_members, 2, network);
             exits.push(exit_tx);
         } else {
-            let (batch_rx, exit_tx) =
-                spawn_honest_member(spawner.clone(), ix, n_members, network.take().unwrap());
+            let (batch_rx, exit_tx) = spawn_honest_member(spawner.clone(), ix, n_members, network);
             batch_rxs.push(batch_rx);
             exits.push(exit_tx);
         }
