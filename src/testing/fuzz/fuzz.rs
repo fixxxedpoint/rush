@@ -4,8 +4,8 @@ use futures::StreamExt;
 
 use crate::{
     nodes::NodeIndex,
-    testing::mock::{new_for_peer_id, node_ix_to_peer, spawn_honest_member},
-    Network, SpawnHandle,
+    testing::mock::{new_for_peer_id, spawn_honest_member},
+    SpawnHandle,
 };
 
 use crate::testing::mock::{configure_network, EvesDroppingHook, Spawner};
@@ -21,7 +21,7 @@ pub(crate) async fn generate_fuzz(path: &Path, n_members: usize, n_batches: usiz
     let spawner = Spawner::new();
     let mut batch_rxs = Vec::new();
     let file = File::create(path).expect("ubable to create a corpus file");
-    let peer_id = node_ix_to_peer(NodeIndex(0));
+    let peer_id = NodeIndex(0);
     let network_hook = EvesDroppingHook::new(file);
     let filtering_hook = new_for_peer_id(network_hook, peer_id);
     let (mut router, mut networks) = configure_network(n_members, 1.0, filtering_hook);
@@ -53,20 +53,20 @@ pub(crate) async fn generate_fuzz(path: &Path, n_members: usize, n_batches: usiz
     // TODO zaimplementuje Network ktory wysyla tylko rzeczy podane z zewnatrz
 }
 
-struct RecorderNetwork<I: Iterator<Item = Vec<u8>>, N: Network> {
-    data: I,
-    wrapped: N,
-}
+// struct RecorderNetwork<I: Iterator<Item = Vec<u8>>, N: Network> {
+//     data: I,
+//     wrapped: N,
+// }
 
-#[async_trait::async_trait]
-impl<I: Iterator<Item = Vec<u8>> + Send, N: Network + Send> Network for RecorderNetwork<I, N> {
-    type Error = ();
+// #[async_trait::async_trait]
+// impl<I: Iterator<Item = Vec<u8>> + Send, N: Network + Send> Network for RecorderNetwork<I, N> {
+//     type Error = ();
 
-    fn send(&self, command: crate::NetworkCommand) -> Result<(), Self::Error> {
-        todo!()
-    }
+//     fn send(&self, command: crate::NetworkCommand) -> Result<(), Self::Error> {
+//         todo!()
+//     }
 
-    async fn next_event(&mut self) -> Option<crate::NetworkEvent> {
-        todo!()
-    }
-}
+//     async fn next_event(&mut self) -> Option<crate::NetworkEvent> {
+//         todo!()
+//     }
+// }
