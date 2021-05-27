@@ -15,7 +15,6 @@ use futures::{
 use std::{
     cell::Cell,
     collections::{hash_map::DefaultHasher, HashMap},
-    fs::File,
     hash::Hasher as StdHasher,
     io::{BufWriter, Write},
     pin::Pin,
@@ -323,49 +322,6 @@ impl<Hook: NetworkHook> UnreliabeRouter<Hook> {
     }
 }
 
-impl<Hook: NetworkHook + Unpin> Future for NetworkHub<Hook> {
-    type Output = ();
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = &mut *self;
-        let mut disconnected_peers: Vec<PeerId> = Vec::new();
-        let mut buffer = Vec::new();
-        for (peer_id, peer) in this.peers.iter_mut() {
-            loop {
-                match peer.rx.poll_next_unpin(cx) {
-                    Poll::Ready(Some(msg)) => {
-                        buffer.push(msg);
-                    }
-                    Poll::Ready(None) => {
-                        disconnected_peers.push(peer_id.clone());
-                        break;
-                    }
-                    Poll::Pending => {
-                        break;
-                    }
-                }
-            }
-        }
-        for peer_id in disconnected_peers {
-            this.peers.remove(&peer_id);
-        }
-        for addr_msg in buffer {
-            let rand_sample = rand::random::<f64>();
-            if rand_sample > this.reliability {
-                debug!("Simulated network fail.");
-                continue;
-            }
-            if let Some(peer) = this.peers.get_mut(&addr_msg.receiver.clone()) {
-                this.hook.update_state(addr_msg.clone());
-                if let Err(e) = peer.tx.unbounded_send(addr_msg) {
-                    error!(target: "network-hub", "Error when routing message via hub {:?}.", e);
-                }
-            }
-        }
-
-        Poll::Pending
-    }
-}
-
 pub(crate) trait NetworkHook: Send {
     fn update_state(&mut self, data: NetworkData, sender: NodeIndex, recipient: NodeIndex);
 }
@@ -420,6 +376,15 @@ impl<IH, F: FnMut(&AddressedMessage) -> bool + Send> FilteringHook<IH, F> {
     }
 }
 
+pub(crate) fn new_for_peer_id<IH>(
+    wrapped: IH,
+    peer_id: PeerId,
+) -> FilteringHook<IH, impl FnMut(&AddressedMessage) -> bool + Send> {
+    FilteringHook::new(wrapped, move |msg: &AddressedMessage| {
+        msg.receiver == peer_id
+    })
+}
+
 impl<IH: NetworkHook, F: FnMut(&AddressedMessage) -> bool + Send> NetworkHook
     for FilteringHook<IH, F>
 {
@@ -436,10 +401,8 @@ pub(crate) struct EvesDroppingHook<S> {
 
 impl<W: Write> EvesDroppingHook<BufWriter<W>> {
     pub(crate) fn new(writer: W) -> EvesDroppingHook<BufWriter<W>> {
-        let buffered_file = BufWriter::new(writer);
-        EvesDroppingHook {
-            sink: buffered_file,
-        }
+        let buffered = BufWriter::new(writer);
+        EvesDroppingHook { sink: buffered }
     }
 }
 
