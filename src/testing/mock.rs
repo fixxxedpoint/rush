@@ -240,7 +240,6 @@ struct Peer {
     rx: NetworkReceiver,
 }
 
-#[derive(Clone)]
 pub(crate) struct UnreliableRouter<Hook> {
     peers: HashMap<NodeIndex, Peer>,
     peer_list: Vec<NodeIndex>,
@@ -289,9 +288,9 @@ impl<Hook: NetworkHook> UnreliableRouter<Hook> {
             for (peer_id, peer) in self.peers.iter_mut() {
                 loop {
                     match peer.rx.try_next() {
-                        Ok(Some(msg)) => buffer.push(msg),
+                        Ok(Some(msg)) => buffer.push((*peer_id, msg)),
                         Ok(None) => {
-                            disconnected_peers.push(peer_id.clone());
+                            disconnected_peers.push(*peer_id);
                             break;
                         }
                         Err(_) => break,
@@ -301,17 +300,17 @@ impl<Hook: NetworkHook> UnreliableRouter<Hook> {
             for peer_id in disconnected_peers.drain(..) {
                 self.peers.remove(&peer_id);
             }
-            for addr_msg in buffer.drain(..) {
+            for (sender, (data, recipient)) in buffer.drain(..) {
                 let rand_sample = rand::random::<f64>();
                 if rand_sample > self.reliability {
                     debug!("Simulated network fail.");
                     continue;
                 }
-                if let Some(peer) = self.peers.get_mut(&addr_msg.receiver.clone()) {
-                    self.hook.update_state(addr_msg.clone());
-                    if let Err(e) = peer.tx.unbounded_send(addr_msg) {
-                        error!(target: "network-hub", "Error when routing message via hub {:?}.", e);
-                    }
+                if let Some(peer) = self.peers.get_mut(&recipient) {
+                    self.hook.update_state(data.clone(), sender, recipient);
+                    peer.tx
+                        .unbounded_send((data, sender))
+                        .expect("channel should be open");
                 }
             }
             yield_now().await;
@@ -353,7 +352,7 @@ impl AlertHook {
 }
 
 impl NetworkHook for AlertHook {
-    fn update_state(&self, data: NetworkData, _: NodeIndex, _: NodeIndex) {
+    fn update_state(&mut self, data: NetworkData, _: NodeIndex, _: NodeIndex) {
         use NetworkDataInner::*;
         if let NetworkDataT(Alert(_)) = data {
             let mut alert_count = self.alert_count.lock();
@@ -367,27 +366,29 @@ pub(crate) struct FilteringHook<IH, F> {
     filter: F,
 }
 
-impl<IH, F: FnMut(&AddressedMessage) -> bool + Send> FilteringHook<IH, F> {
-    pub(crate) fn new(wrapped: IH, filter: F) -> FilteringHook<IH, F> {
+impl<IH, F: FnMut(&NetworkData, &NodeIndex, &NodeIndex) -> bool + Send> FilteringHook<IH, F> {
+    pub(crate) fn new(wrapped: IH, filter: F) -> Self {
         FilteringHook { wrapped, filter }
     }
+
+    // pub(crate) fn new_for_peer_id(wrapped: IH, peer_id: NodeIndex) -> Self {
+    //     FilteringHook::new(wrapped, move |_, _, receiver| receiver == peer_id)
+    // }
 }
 
 pub(crate) fn new_for_peer_id<IH>(
     wrapped: IH,
-    peer_id: PeerId,
-) -> FilteringHook<IH, impl FnMut(&AddressedMessage) -> bool + Send> {
-    FilteringHook::new(wrapped, move |msg: &AddressedMessage| {
-        msg.receiver == peer_id
-    })
+    peer_id: NodeIndex,
+) -> FilteringHook<IH, impl FnMut(&NetworkData, &NodeIndex, &NodeIndex) -> bool + Send> {
+    FilteringHook::new(wrapped, move |_, _, receiver| *receiver == peer_id)
 }
 
-impl<IH: NetworkHook, F: FnMut(&AddressedMessage) -> bool + Send> NetworkHook
+impl<IH: NetworkHook, F: FnMut(&NetworkData, &NodeIndex, &NodeIndex) -> bool + Send> NetworkHook
     for FilteringHook<IH, F>
 {
     fn update_state(&mut self, data: NetworkData, sender: NodeIndex, recipient: NodeIndex) {
-        if (self.filter)(&msg) {
-            self.wrapped.update_state(msg);
+        if (self.filter)(&data, &sender, &recipient) {
+            self.wrapped.update_state(data, sender, recipient);
         }
     }
 }
@@ -404,9 +405,10 @@ impl<W: Write> EvesDroppingHook<BufWriter<W>> {
 }
 
 impl<S: Write + Send> NetworkHook for EvesDroppingHook<S> {
-    fn update_state(&mut self, msg: AddressedMessage) {
+    fn update_state(&mut self, data: NetworkData, sender: NodeIndex, recipient: NodeIndex) {
+        let encoded = (data, sender, recipient).encode();
         self.sink
-            .write_all(&msg.message[..])
+            .write_all(&encoded[..])
             .expect("error while evesdropping network communication");
     }
 }
@@ -502,7 +504,7 @@ pub(crate) fn configure_network(
 ) -> (UnreliableRouter<impl NetworkHook>, Vec<Option<Network>>) {
     let peer_list = (0..n_members).map(NodeIndex).collect();
 
-    let router = UnreliableRouter::new(peer_list, reliability, hook);
+    let mut router = UnreliableRouter::new(peer_list, reliability, hook);
     let mut networks = Vec::new();
     for ix in 0..n_members {
         let network = router.connect_peer(NodeIndex(ix));
