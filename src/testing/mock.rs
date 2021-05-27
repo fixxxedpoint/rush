@@ -257,9 +257,9 @@ pub(crate) struct UnreliableRouter<Hook> {
     reliability: f64, //a number in the range [0, 1], 1.0 means perfect reliability, 0.0 means no message gets through
 }
 
-impl<Hook: NetworkHook> UnreliabeRouter<Hook> {
+impl<Hook: NetworkHook> UnreliableRouter<Hook> {
     pub(crate) fn new(peer_list: Vec<NodeIndex>, reliability: f64, hook: Hook) -> Self {
-        NetworkHub {
+        UnreliableRouter {
             peers: HashMap::new(),
             peer_list,
             hook,
@@ -267,11 +267,7 @@ impl<Hook: NetworkHook> UnreliabeRouter<Hook> {
         }
     }
 
-    pub(crate) fn add_hook<HK: NetworkHook + 'static>(&self, hook: HK) {
-        self.hook_list.lock().push(Box::new(hook));
-    }
-
-    pub(crate) fn connect_peer(&self, peer: NodeIndex) -> Network {
+    pub(crate) fn connect_peer(&mut self, peer: NodeIndex) -> Network {
         assert!(
             self.peer_list.iter().any(|p| *p == peer),
             "Must connect a peer in the list."
@@ -290,8 +286,8 @@ impl<Hook: NetworkHook> UnreliabeRouter<Hook> {
         Network {
             rx: rx_out_hub,
             tx: tx_in_hub,
-            peer_list: self.peer_list.clone(),
-            my_peer_id: peer,
+            peers: self.peer_list.clone(),
+            index: peer,
         }
     }
 
@@ -326,9 +322,6 @@ impl<Hook: NetworkHook> UnreliabeRouter<Hook> {
                         error!(target: "network-hub", "Error when routing message via hub {:?}.", e);
                     }
                 }
-                peer.tx
-                    .unbounded_send((data, sender))
-                    .expect("channel should be open");
             }
             yield_now().await;
         }
@@ -412,7 +405,7 @@ pub(crate) fn new_for_peer_id<IH>(
 impl<IH: NetworkHook, F: FnMut(&AddressedMessage) -> bool + Send> NetworkHook
     for FilteringHook<IH, F>
 {
-    fn update_state(&mut self, msg: AddressedMessage) {
+    fn update_state(&mut self, data: NetworkData, sender: NodeIndex, recipient: NodeIndex) {
         if (self.filter)(&msg) {
             self.wrapped.update_state(msg);
         }
@@ -582,7 +575,7 @@ pub(crate) fn configure_network(
     n_members: usize,
     reliability: f64,
     hook: impl NetworkHook,
-) -> (UnreliableRouter, Vec<Option<Network>>) {
+) -> (UnreliableRouter<impl NetworkHook>, Vec<Option<Network>>) {
     let peer_list = (0..n_members).map(NodeIndex).collect();
 
     let router = UnreliableRouter::new(peer_list, reliability, hook);
