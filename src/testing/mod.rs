@@ -8,6 +8,7 @@ mod consensus;
 mod crash;
 #[cfg(test)]
 mod dag;
+pub mod fuzz;
 #[cfg(test)]
 pub(crate) mod mock;
 #[cfg(test)]

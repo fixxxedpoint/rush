@@ -1,5 +1,10 @@
 use async_trait::async_trait;
 use codec::{Decode, Encode};
+use log::{debug, error};
+use parking_lot::Mutex;
+
+use tokio::{task::yield_now, time::Duration};
+
 use futures::{
     channel::{
         mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
@@ -297,14 +302,13 @@ impl<Hook: NetworkHook> UnreliabeRouter<Hook> {
         while !self.peers.is_empty() {
             for (peer_id, peer) in self.peers.iter_mut() {
                 loop {
-                    let next = peer.rx.try_next();
-                    match next {
+                    match peer.rx.try_next() {
                         Ok(Some(msg)) => buffer.push(msg),
                         Ok(None) => {
                             disconnected_peers.push(peer_id.clone());
                             break;
                         }
-                        Err(_) => {}
+                        Err(_) => break,
                     }
                 }
             }
@@ -327,7 +331,51 @@ impl<Hook: NetworkHook> UnreliabeRouter<Hook> {
                     .unbounded_send((data, sender))
                     .expect("channel should be open");
             }
+            yield_now().await;
         }
+    }
+}
+
+impl<Hook: NetworkHook + Unpin> Future for NetworkHub<Hook> {
+    type Output = ();
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        let mut disconnected_peers: Vec<PeerId> = Vec::new();
+        let mut buffer = Vec::new();
+        for (peer_id, peer) in this.peers.iter_mut() {
+            loop {
+                match peer.rx.poll_next_unpin(cx) {
+                    Poll::Ready(Some(msg)) => {
+                        buffer.push(msg);
+                    }
+                    Poll::Ready(None) => {
+                        disconnected_peers.push(peer_id.clone());
+                        break;
+                    }
+                    Poll::Pending => {
+                        break;
+                    }
+                }
+            }
+        }
+        for peer_id in disconnected_peers {
+            this.peers.remove(&peer_id);
+        }
+        for addr_msg in buffer {
+            let rand_sample = rand::random::<f64>();
+            if rand_sample > this.reliability {
+                debug!("Simulated network fail.");
+                continue;
+            }
+            if let Some(peer) = this.peers.get_mut(&addr_msg.receiver.clone()) {
+                this.hook.update_state(addr_msg.clone());
+                if let Err(e) = peer.tx.unbounded_send(addr_msg) {
+                    error!(target: "network-hub", "Error when routing message via hub {:?}.", e);
+                }
+            }
+        }
+
+        Poll::Pending
     }
 }
 
@@ -385,13 +433,34 @@ impl NetworkHook for AlertHook {
     }
 }
 
+pub(crate) struct FilteringHook<IH, F> {
+    wrapped: IH,
+    filter: F,
+}
+
+impl<IH, F: FnMut(&AddressedMessage) -> bool + Send> FilteringHook<IH, F> {
+    pub(crate) fn new(wrapped: IH, filter: F) -> FilteringHook<IH, F> {
+        FilteringHook { wrapped, filter }
+    }
+}
+
+impl<IH: NetworkHook, F: FnMut(&AddressedMessage) -> bool + Send> NetworkHook
+    for FilteringHook<IH, F>
+{
+    fn update_state(&mut self, msg: AddressedMessage) {
+        if (self.filter)(&msg) {
+            self.wrapped.update_state(msg);
+        }
+    }
+}
+
 pub(crate) struct EvesDroppingHook<S> {
     sink: S,
 }
 
-impl EvesDroppingHook<BufWriter<File>> {
-    fn new(file: File) -> EvesDroppingHook<BufWriter<File>> {
-        let buffered_file = BufWriter::new(file);
+impl<W: Write> EvesDroppingHook<BufWriter<W>> {
+    pub(crate) fn new(writer: W) -> EvesDroppingHook<BufWriter<W>> {
+        let buffered_file = BufWriter::new(writer);
         EvesDroppingHook {
             sink: buffered_file,
         }
