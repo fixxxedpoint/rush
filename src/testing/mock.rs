@@ -1,4 +1,4 @@
-use codec::{Decode, Encode};
+use codec::{Decode, Encode, Error, IoReader};
 use log::{debug, error};
 use parking_lot::Mutex;
 
@@ -16,7 +16,7 @@ use std::{
     cell::Cell,
     collections::{hash_map::DefaultHasher, HashMap},
     hash::Hasher as StdHasher,
-    io::{BufWriter, Write},
+    io::{BufWriter, Read, Write},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -393,25 +393,66 @@ impl<IH: NetworkHook, F: FnMut(&NetworkData, &NodeIndex, &NodeIndex) -> bool + S
     }
 }
 
-pub(crate) struct EvesDroppingHook<S> {
-    sink: S,
-}
+// pub(crate) trait NetworkEncoder {
+//     fn encode(&NetworkData, &NodeIndex, &NodeIndex) -> Vec<u8>;
+// }
 
-impl<W: Write> EvesDroppingHook<BufWriter<W>> {
-    pub(crate) fn new(writer: W) -> EvesDroppingHook<BufWriter<W>> {
-        let buffered = BufWriter::new(writer);
-        EvesDroppingHook { sink: buffered }
+// pub(crate) struct EvesDroppingHook<S>
+// where
+//     S: FnMut(&NetworkData, &NodeIndex, &NodeIndex),
+// {
+//     sink: S,
+// }
+
+// pub struct IoReader<R: std::io::Read>(pub R);
+pub(crate) struct EvesDroppingHook<S: FnMut(&NetworkData, &NodeIndex, &NodeIndex)>(pub S);
+
+impl<S: FnMut(&NetworkData, &NodeIndex, &NodeIndex)> EvesDroppingHook<S> {
+    pub(crate) fn new(sink: S) -> EvesDroppingHook<S> {
+        EvesDroppingHook(sink)
     }
 }
 
-impl<S: Write + Send> NetworkHook for EvesDroppingHook<S> {
+impl<S: FnMut(&NetworkData, &NodeIndex, &NodeIndex) + Send> NetworkHook for EvesDroppingHook<S> {
     fn update_state(&mut self, data: NetworkData, sender: NodeIndex, recipient: NodeIndex) {
         let encoded = (data, sender, recipient).encode();
-        self.sink
-            .write_all(&encoded[..])
-            .expect("error while evesdropping network communication");
+        (self.0)(&data, &sender, &recipient);
     }
 }
+
+pub(crate) struct NetworkDataEncoderDecoder {}
+
+impl NetworkDataEncoderDecoder {
+    pub fn encode_into<W: Write>(self, data: (NetworkData, NodeIndex, NodeIndex), writer: W) {
+        writer.write_all(&data.encode());
+    }
+
+    // impl<R: std::io::Read> Input for IoReader<R> {
+    pub fn decode_from<R: Read>(
+        self,
+        reader: R,
+    ) -> Result<(NetworkData, NodeIndex, NodeIndex), Error> {
+        let mut reader = IoReader(reader);
+        <(NetworkData, NodeIndex, NodeIndex)>::decode(&mut reader)
+        // .expect("invalid format of NetworkData")
+    }
+}
+
+// impl<W: Write> EvesDroppingHook<BufWriter<W>> {
+//     pub(crate) fn new(writer: W) -> EvesDroppingHook<BufWriter<W>> {
+//         let buffered = BufWriter::new(writer);
+//         EvesDroppingHook { sink: buffered }
+//     }
+// }
+
+// impl<S: Write + Send> NetworkHook for EvesDroppingHook<S> {
+//     fn update_state(&mut self, data: NetworkData, sender: NodeIndex, recipient: NodeIndex) {
+//         let encoded = (data, sender, recipient).encode();
+//         self.sink
+//             .write_all(&encoded[..])
+//             .expect("error while evesdropping network communication");
+//     }
+// }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Hash)]
 pub(crate) struct Data {
