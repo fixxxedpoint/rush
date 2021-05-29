@@ -1,11 +1,16 @@
-use std::{fs::File, path::Path};
+use std::{
+    fs::File,
+    io::{BufWriter, Read},
+    path::Path,
+};
 
-use futures::StreamExt;
+use codec::{Decode, Encode};
+use futures::{channel::mpsc::channel, SinkExt, Stream, StreamExt};
 
 use crate::{
     nodes::NodeIndex,
-    testing::mock::{new_for_peer_id, spawn_honest_member},
-    SpawnHandle,
+    testing::mock::{new_for_peer_id, spawn_honest_member, NetworkDataEncoderDecoder},
+    Data, Hasher, Network, NetworkData, SpawnHandle,
 };
 
 use crate::testing::mock::{configure_network, EvesDroppingHook, Spawner};
@@ -21,8 +26,13 @@ pub(crate) async fn generate_fuzz(path: &Path, n_members: usize, n_batches: usiz
     let spawner = Spawner::new();
     let mut batch_rxs = Vec::new();
     let file = File::create(path).expect("ubable to create a corpus file");
+    let buffered = BufWriter::new(file);
+    let enc_dec = NetworkDataEncoderDecoder {};
     let peer_id = NodeIndex(0);
-    let network_hook = EvesDroppingHook::new(file);
+    let store = move |data, sender, recipient| {
+        enc_dec.encode_into((*data, *sender, *recipient), buffered);
+    };
+    let network_hook = EvesDroppingHook::new(store);
     let filtering_hook = new_for_peer_id(network_hook, peer_id);
     let (mut router, mut networks) = configure_network(n_members, 1.0, filtering_hook);
 
@@ -53,10 +63,53 @@ pub(crate) async fn generate_fuzz(path: &Path, n_members: usize, n_batches: usiz
     // TODO zaimplementuje Network ktory wysyla tylko rzeczy podane z zewnatrz
 }
 
-// struct RecorderNetwork<I: Iterator<Item = Vec<u8>>, N: Network> {
-//     data: I,
-//     wrapped: N,
-// }
+fn read_session_data<R: Read, H, D, S, Spawn: SpawnHandle>(
+    reader: R,
+    spawn_handle: Spawn,
+) -> impl Stream<Item = (NetworkData<H, D, S>, NodeIndex, NodeIndex)> + Send + Unpin {
+    let (sender, receiver) = channel(0);
+    let enc_dec = NetworkDataEncoderDecoder {};
+    spawn_handle.spawn("reader", async move {
+        while let Ok(v) = enc_dec.decode_from(reader) {
+            sender.send(v);
+        }
+    });
+    receiver
+}
+
+struct RecorderNetwork<
+    H: Hasher,
+    D: Data,
+    S: Encode + Decode,
+    I: Stream<Item = NetworkData<H, D, S>>,
+    // N: Network<H, D, S>,
+> {
+    data: I,
+    // wrapped: N,
+}
+
+#[async_trait::async_trait]
+impl<
+        H: Hasher,
+        D: Data,
+        S: Encode + Decode,
+        I: Stream<Item = NetworkData<H, D, S>> + Send + Unpin,
+    > Network<H, D, S> for RecorderNetwork<H, D, S, I>
+{
+    type Error = ();
+
+    fn send(&self, _: NetworkData<H, D, S>, _: NodeIndex) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn broadcast(&self, _: NetworkData<H, D, S>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn next_event(&mut self) -> Option<NetworkData<H, D, S>> {
+        self.data.next().await
+    }
+}
 
 // #[async_trait::async_trait]
 // impl<I: Iterator<Item = Vec<u8>> + Send, N: Network + Send> Network for RecorderNetwork<I, N> {
@@ -70,3 +123,7 @@ pub(crate) async fn generate_fuzz(path: &Path, n_members: usize, n_batches: usiz
 //         todo!()
 //     }
 // }
+
+// fn send(&self, data: NetworkData<H, D, S>, node: NodeIndex) -> Result<(), Self::Error>;
+// fn broadcast(&self, data: NetworkData<H, D, S>) -> Result<(), Self::Error>;
+// async fn next_event(&mut self) -> Option<NetworkData<H, D, S>>;
