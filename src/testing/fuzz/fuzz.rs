@@ -1,16 +1,31 @@
 use std::{
     fs::File,
-    io::{BufWriter, Read},
+    io::{BufRead, BufReader, BufWriter, Read, Result},
+    marker::PhantomData,
     path::Path,
+    sync::atomic::AtomicBool,
+    time::Duration,
 };
 
-use codec::{Decode, Encode};
-use futures::{channel::mpsc::channel, SinkExt, Stream, StreamExt};
+use codec::{Decode, Encode, Error};
+use futures::{
+    channel::{
+        mpsc::{channel, unbounded, Sender},
+        oneshot,
+    },
+    FutureExt, SinkExt, Stream, StreamExt,
+};
+use tokio::{
+    select,
+    time::{delay_for, Delay},
+};
 
 use crate::{
     nodes::NodeIndex,
-    testing::mock::{new_for_peer_id, spawn_honest_member, NetworkDataEncoderDecoder},
-    Data, Hasher, Network, NetworkData, SpawnHandle,
+    testing::mock::{
+        new_for_peer_id, spawn_honest_member, Data, Hasher64, NetworkDataEncoderDecoder, Signature,
+    },
+    Hasher, Network, NetworkData, SpawnHandle,
 };
 
 use crate::testing::mock::{configure_network, EvesDroppingHook, Spawner};
@@ -26,13 +41,9 @@ pub(crate) async fn generate_fuzz(path: &Path, n_members: usize, n_batches: usiz
     let spawner = Spawner::new();
     let mut batch_rxs = Vec::new();
     let file = File::create(path).expect("ubable to create a corpus file");
-    let buffered = BufWriter::new(file);
     let enc_dec = NetworkDataEncoderDecoder {};
     let peer_id = NodeIndex(0);
-    let store = move |data, sender, recipient| {
-        enc_dec.encode_into((*data, *sender, *recipient), buffered);
-    };
-    let network_hook = EvesDroppingHook::new(store);
+    let network_hook = EvesDroppingHook::new(file);
     let filtering_hook = new_for_peer_id(network_hook, peer_id);
     let (mut router, mut networks) = configure_network(n_members, 1.0, filtering_hook);
 
@@ -63,67 +74,128 @@ pub(crate) async fn generate_fuzz(path: &Path, n_members: usize, n_batches: usiz
     // TODO zaimplementuje Network ktory wysyla tylko rzeczy podane z zewnatrz
 }
 
-fn read_session_data<R: Read, H, D, S, Spawn: SpawnHandle>(
-    reader: R,
-    spawn_handle: Spawn,
-) -> impl Stream<Item = (NetworkData<H, D, S>, NodeIndex, NodeIndex)> + Send + Unpin {
-    let (sender, receiver) = channel(0);
-    let enc_dec = NetworkDataEncoderDecoder {};
-    spawn_handle.spawn("reader", async move {
-        while let Ok(v) = enc_dec.decode_from(reader) {
-            sender.send(v);
+fn after_iter<I>(iter: impl Iterator<Item = I>, action: impl FnMut()) -> impl Iterator {
+    struct EndSignal<S: FnMut()> {
+        signal: S,
+    }
+    impl<S, I> IntoIterator for EndSignal<S> {
+        type Item = StoredNetworkData;
+
+        type IntoIter = std::vec::IntoIter<I>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.signal();
+            vec![].into_iter()
         }
-    });
-    receiver
+    }
+    iter.chain(EndSignal { signal: action })
 }
 
-struct RecorderNetwork<
-    H: Hasher,
-    D: Data,
-    S: Encode + Decode,
-    I: Stream<Item = NetworkData<H, D, S>>,
-    // N: Network<H, D, S>,
-> {
+async fn fuzz(data: impl Iterator<Item = StoredNetworkData>, n_members: usize) {
+    const NETWORK_DELAY: u64 = 200;
+    let spawner = Spawner::new();
+    let (empty_tx, empty_rx) = oneshot::channel();
+    let data = after_iter(data, move || empty_tx.send(()));
+
+    let network = RecorderNetwork::new(data, NETWORK_DELAY);
+    let mut batch_rxs = Vec::new();
+
+    let (batch_rx, exit_tx) = spawn_honest_member(spawner.clone(), 0, n_members, network);
+
+    empty_rx.await;
+    exit_tx.send(());
+
+    // 'exits' is dropped here and allows members to gracefully exit
+    spawner.wait().await;
+}
+
+struct StoredNetworkData {
+    data: NetworkData<Hasher64, Data, Signature>,
+    sender: NodeIndex,
+    recipient: NodeIndex,
+}
+
+struct NetworkDataIterator<R: Read> {
+    // input: R,
+    buf: BufReader<R>,
+    enc_dec: NetworkDataEncoderDecoder,
+}
+
+impl<R: Read> NetworkDataIterator<R> {
+    fn new(read: R) -> Self {
+        NetworkDataIterator {
+            // input: read,
+            buf: BufReader::new(read),
+            enc_dec: NetworkDataEncoderDecoder {},
+        }
+    }
+}
+
+impl<R: Read> Iterator for NetworkDataIterator<R> {
+    type Item = Result<StoredNetworkData>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.buf.fill_buf() {
+            Ok(buf) => {
+                if buf.is_empty() {
+                    return None;
+                }
+            }
+            Err(e) => return Some(Err(e)),
+        }
+        let next = self.enc_dec.decode_from(&mut self.input);
+        match next {
+            Ok(next) => Some(Ok(StoredNetworkData {
+                data: next.0,
+                sender: next.1,
+                recipient: next.2,
+            })),
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+// TODO implement also saving of sent messages, like in the asynchronous model, so you can one-to-one record the protocols execution
+struct RecorderNetwork<I: Iterator<Item = NetworkData<Hasher64, Data, Signature>>> {
     data: I,
-    // wrapped: N,
+    delay_millis: u64,
+    next_delay: Delay,
+}
+
+impl<I: Iterator<Item = NetworkData<Hasher64, Data, Signature>>> RecorderNetwork<I> {
+    fn new(data: I, delay_millis: u64) -> Self {
+        RecorderNetwork {
+            data,
+            delay_millis,
+            next_delay: delay_for(Duration::ZERO),
+        }
+    }
 }
 
 #[async_trait::async_trait]
-impl<
-        H: Hasher,
-        D: Data,
-        S: Encode + Decode,
-        I: Stream<Item = NetworkData<H, D, S>> + Send + Unpin,
-    > Network<H, D, S> for RecorderNetwork<H, D, S, I>
+impl<I: Iterator<Item = NetworkData<Hasher64, Data, Signature>> + Send>
+    Network<Hasher64, Data, Signature> for RecorderNetwork<I>
 {
     type Error = ();
 
-    fn send(&self, _: NetworkData<H, D, S>, _: NodeIndex) -> Result<(), Self::Error> {
+    fn send(
+        &self,
+        _: NetworkData<Hasher64, Data, Signature>,
+        _: NodeIndex,
+    ) -> std::result::Result<(), Self::Error> {
         Ok(())
     }
 
-    fn broadcast(&self, _: NetworkData<H, D, S>) -> Result<(), Self::Error> {
+    fn broadcast(
+        &self,
+        _: NetworkData<Hasher64, Data, Signature>,
+    ) -> std::result::Result<(), Self::Error> {
         Ok(())
     }
 
-    async fn next_event(&mut self) -> Option<NetworkData<H, D, S>> {
-        self.data.next().await
+    async fn next_event(&mut self) -> Option<NetworkData<Hasher64, Data, Signature>> {
+        self.next_delay.await;
+        self.next_delay = delay_for(Duration::from_millis(self.delay_millis));
+        self.data.next()
     }
 }
-
-// #[async_trait::async_trait]
-// impl<I: Iterator<Item = Vec<u8>> + Send, N: Network + Send> Network for RecorderNetwork<I, N> {
-//     type Error = ();
-
-//     fn send(&self, command: crate::NetworkCommand) -> Result<(), Self::Error> {
-//         todo!()
-//     }
-
-//     async fn next_event(&mut self) -> Option<crate::NetworkEvent> {
-//         todo!()
-//     }
-// }
-
-// fn send(&self, data: NetworkData<H, D, S>, node: NodeIndex) -> Result<(), Self::Error>;
-// fn broadcast(&self, data: NetworkData<H, D, S>) -> Result<(), Self::Error>;
-// async fn next_event(&mut self) -> Option<NetworkData<H, D, S>>;
