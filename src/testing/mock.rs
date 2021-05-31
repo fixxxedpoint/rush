@@ -417,24 +417,31 @@ where
     encoder: NetworkDataEncoderDecoder,
 }
 
+#[derive(Encode, Decode)]
+pub(crate) struct StoredNetworkData {
+    data: crate::NetworkData<Hasher64, Data, Signature>,
+    sender: NodeIndex,
+    recipient: NodeIndex,
+}
+
 pub(crate) struct NetworkDataEncoderDecoder {}
 
 impl NetworkDataEncoderDecoder {
-    pub fn encode_into<W: Write>(
-        &self,
-        data: (&NetworkData, &NodeIndex, &NodeIndex),
-        writer: &mut W,
-    ) -> Result<()> {
-        let data = (data.0.clone(), *data.1, *data.2);
-        writer.write_all(&data.encode())
+    pub fn encode_into<W: Write>(&self, data: StoredNetworkData, writer: &mut W) -> Result<()> {
+        // writer.write_all(data.data.encode())?;
+        // writer.write_all(data.sender.encode())?;
+        // writer.write_all(data.recipient.encode())?;
+        writer.write_all(data.encode())
     }
 
-    pub fn decode_from<R: Read>(
-        &self,
-        reader: &mut R,
-    ) -> Result<(NetworkData, NodeIndex, NodeIndex)> {
-        let mut reader = IoReader(reader);
-        <(NetworkData, NodeIndex, NodeIndex)>::decode(&mut reader)
+    pub fn decode_from<R: Read>(&self, reader: &mut R) -> Result<StoredNetworkData> {
+        // let mut reader = IoReader(reader);
+        // // <(NetworkData, NodeIndex, NodeIndex)>::decode(&mut reader)
+        // let net_data = NetworkData::decode(&mut reader);
+        // let sender = NodeIndex::decode(&mut reader);
+        // let recipient = NodeIndex::decode(&mut reader);
+        // (net_data, sender, recipient)
+        StoredNetworkData::decode(&mut reader)
     }
 }
 
@@ -450,8 +457,14 @@ impl<W: Write> EvesDroppingHook<BufWriter<W>> {
 
 impl<S: Write + Send> NetworkHook for EvesDroppingHook<S> {
     fn update_state(&mut self, data: NetworkData, sender: NodeIndex, recipient: NodeIndex) {
-        self.encoder
-            .encode_into((&data, &sender, &recipient), &mut self.sink)
+        self.encoder.encode_into(
+            StoredNetworkData {
+                data,
+                sender,
+                recipient,
+            },
+            &mut self.sink,
+        )
     }
 }
 

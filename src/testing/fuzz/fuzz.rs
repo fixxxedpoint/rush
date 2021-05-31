@@ -1,7 +1,6 @@
 use std::{
     fs::File,
     io::{BufRead, BufReader, BufWriter, Read, Result},
-    marker::PhantomData,
     path::Path,
     sync::atomic::AtomicBool,
     time::Duration,
@@ -24,11 +23,14 @@ use crate::{
     nodes::NodeIndex,
     testing::mock::{
         new_for_peer_id, spawn_honest_member, Data, Hasher64, NetworkDataEncoderDecoder, Signature,
+        StoredNetworkData,
     },
     Hasher, Network, NetworkData, SpawnHandle,
 };
 
 use crate::testing::mock::{configure_network, EvesDroppingHook, Spawner};
+
+use libfuzzer_sys::arbitrary::Arbitrary;
 
 #[tokio::test(max_threads = 1)]
 #[ignore]
@@ -107,12 +109,6 @@ async fn fuzz(data: impl Iterator<Item = StoredNetworkData>, n_members: usize) {
 
     // 'exits' is dropped here and allows members to gracefully exit
     spawner.wait().await;
-}
-
-struct StoredNetworkData {
-    data: NetworkData<Hasher64, Data, Signature>,
-    sender: NodeIndex,
-    recipient: NodeIndex,
 }
 
 struct NetworkDataIterator<R: Read> {
