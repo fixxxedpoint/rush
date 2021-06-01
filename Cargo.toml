@@ -20,4 +20,4 @@ env_logger = "0.8.3"
 codec = { package = "parity-scale-codec", version = "2", default-features = false, features = ["derive", "std"] }
 rand = "0.8.3"
 async-trait = "0"
-arbitrary = "1"
+libfuzzer-sys = "0.4"
