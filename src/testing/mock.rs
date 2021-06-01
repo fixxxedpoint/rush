@@ -417,13 +417,10 @@ where
     I: Iterator<Item = u8>,
 {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        Ok(buf
-            .iter_mut()
-            .zip(&mut self.0)
-            .map(|(b, val)| {
-                *b = val;
-            })
-            .count())
+        Ok(buf.iter_mut().zip(&mut self.0).fold(0, |count, (b, v)| {
+            *b = v;
+            count + 1
+        }))
     }
 }
 
