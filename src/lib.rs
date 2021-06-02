@@ -21,7 +21,7 @@ pub mod nodes;
 mod signed;
 pub use signed::*;
 mod terminal;
-mod testing;
+pub mod testing;
 mod units;
 
 pub trait DataIO<Data> {

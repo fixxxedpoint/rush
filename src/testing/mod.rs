@@ -2,7 +2,7 @@
 pub mod byzantine;
 #[cfg(test)]
 pub mod crash;
-#[cfg(test)]
+#[cfg(any(feature = "fuzz", test))]
 pub mod fuzz;
-#[cfg(test)]
+#[cfg(any(feature = "fuzz", test))]
 pub mod mock;

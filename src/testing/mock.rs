@@ -2,7 +2,7 @@ use codec::{Decode, Encode, IoReader};
 use log::{debug, error};
 use parking_lot::Mutex;
 
-use tokio::{task::yield_now, time::Duration};
+use tokio::task::yield_now;
 
 use futures::{
     channel::{
@@ -20,6 +20,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
+    time::Duration,
 };
 
 use crate::{
@@ -31,8 +32,6 @@ use crate::{
 };
 
 use crate::member::Member;
-
-use libfuzzer_sys::arbitrary::{Arbitrary, Result as AResult, Unstructured};
 
 pub fn init_log() {
     let _ = env_logger::builder()
@@ -204,7 +203,7 @@ impl Spawner {
     }
 }
 
-type NetworkData = NetworkDataT<Hasher64, Data, Signature>;
+pub type NetworkData = NetworkDataT<Hasher64, Data, Signature>;
 type NetworkReceiver = UnboundedReceiver<(NetworkData, NodeIndex)>;
 type NetworkSender = UnboundedSender<(NetworkData, NodeIndex)>;
 
@@ -399,76 +398,23 @@ where
     encoder: NetworkDataEncoderDecoder,
 }
 
-#[derive(Encode, Decode)]
-pub(crate) struct StoredNetworkData(pub(crate) crate::NetworkData<Hasher64, Data, Signature>);
-
-struct VecOfStoredNetworkData(pub(crate) Vec<StoredNetworkData>);
-
-struct IteratorToRead<I: Iterator<Item = u8>>(I);
-
-impl<I: Iterator<Item = u8>> IteratorToRead<I> {
-    fn new(iter: I) -> Self {
-        IteratorToRead(iter)
-    }
-}
-
-impl<I> Read for IteratorToRead<I>
-where
-    I: Iterator<Item = u8>,
-{
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        Ok(buf.iter_mut().zip(&mut self.0).fold(0, |count, (b, v)| {
-            *b = v;
-            count + 1
-        }))
-    }
-}
-
-impl<'a> Arbitrary<'a> for VecOfStoredNetworkData {
-    fn arbitrary(u: &mut Unstructured<'a>) -> AResult<Self> {
-        let decoder = NetworkDataEncoderDecoder::new();
-        let all_data = u.arbitrary_iter().expect("no data available");
-        let all_data = all_data.take_while(|u| u.is_ok()).map(|u| u.unwrap());
-        let mut all_data = IteratorToRead::new(all_data);
-        let mut result = vec![];
-        loop {
-            let data = decoder.decode_from(&mut all_data);
-            match data {
-                Ok(v) => {
-                    result.push(v);
-                }
-                Err(_) => {
-                    // return Err(libfuzzer_sys::arbitrary::Error::IncorrectFormat);
-                    break;
-                }
-            }
-        }
-        if result.is_empty() {
-            // Err("unable to build valid data from a given instance of Unstructured")
-            panic!("bla bla")
-        } else {
-            libfuzzer_sys::arbitrary::Result::Ok(VecOfStoredNetworkData(result))
-        }
-    }
-}
-
-pub(crate) struct NetworkDataEncoderDecoder {}
+pub struct NetworkDataEncoderDecoder {}
 
 impl NetworkDataEncoderDecoder {
     pub fn new() -> Self {
         NetworkDataEncoderDecoder {}
     }
 
-    pub fn encode_into<W: Write>(&self, data: StoredNetworkData, writer: &mut W) -> Result<()> {
+    pub fn encode_into<W: Write>(&self, data: NetworkData, writer: &mut W) -> Result<()> {
         writer.write_all(&data.encode()[..])
     }
 
     pub fn decode_from<R: Read>(
         &self,
         reader: &mut R,
-    ) -> core::result::Result<StoredNetworkData, codec::Error> {
+    ) -> core::result::Result<NetworkData, codec::Error> {
         let mut reader = IoReader(reader);
-        StoredNetworkData::decode(&mut reader)
+        <NetworkData>::decode(&mut reader)
     }
 }
 
@@ -482,14 +428,13 @@ impl<W: Write> EvesDroppingHook<W> {
 }
 
 impl<S: Write + Send> NetworkHook for EvesDroppingHook<S> {
-    fn update_state(&mut self, data: NetworkData, sender: NodeIndex, _: NodeIndex) {
-        self.encoder
-            .encode_into(StoredNetworkData(data), &mut self.sink);
+    fn update_state(&mut self, data: NetworkData, _: NodeIndex, _: NodeIndex) {
+        self.encoder.encode_into(data, &mut self.sink).unwrap();
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Hash)]
-pub(crate) struct Data {
+pub struct Data {
     coord: UnitCoord,
     variant: u32,
 }
@@ -501,7 +446,7 @@ impl Data {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-pub(crate) struct Signature {}
+pub struct Signature {}
 
 pub(crate) struct DataIO {
     ix: NodeIndex,
