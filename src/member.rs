@@ -3,7 +3,7 @@ use futures::{
     channel::{mpsc, oneshot},
     FutureExt, StreamExt,
 };
-use log::{debug, error};
+use log::{debug, error, info};
 use rand::Rng;
 
 use crate::{
@@ -830,12 +830,21 @@ where
                 },
 
                 _ = ticker.tick() => self.trigger_tasks(),
-                _ = exit.next() => break,
+                _ = exit.next() => {
+                    self.exit();
+                    info!(target: "rush-member", "{:?} Closed by external request.", self.index());
+                    break;
+                },
             }
             self.move_units_to_consensus();
         }
 
         let _ = consensus_exit.send(());
         let _ = network_exit.send(());
+    }
+
+    fn exit(&self) {
+        info!(target: "rush-member", "{:?} Closed by external request.", self.index());
+        panic!("early exit");
     }
 }

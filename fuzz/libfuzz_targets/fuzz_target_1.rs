@@ -1,8 +1,8 @@
 #![no_main]
 use codec::{Decode, Encode};
-use futures::executor;
 use libfuzzer_sys::arbitrary::{Arbitrary, Error, Result, Unstructured};
 use libfuzzer_sys::fuzz_target;
+use log::error;
 use rush::testing::fuzz::fuzz::fuzz;
 use rush::testing::mock::{NetworkData, NetworkDataEncoderDecoder};
 use std::fmt;
@@ -65,7 +65,10 @@ impl<'a> Arbitrary<'a> for VecOfStoredNetworkData {
         let mut result = vec![];
         for nd in u.arbitrary_iter::<StoredNetworkData>()? {
             match nd {
-                Err(_) => continue,
+                Err(_) => {
+                    error!(target: "Arbitrary for VecOfStoredNetworkData", "Error while generating an instance of the StoredNetworkData type.");
+                    continue;
+                }
                 Ok(v) => result.push(v),
             }
         }
@@ -75,8 +78,6 @@ impl<'a> Arbitrary<'a> for VecOfStoredNetworkData {
 
 fuzz_target!(|data: VecOfStoredNetworkData| {
     use tokio::runtime::Runtime;
-    // panic!("3");
     let remapped = data.0.into_iter().map(|v| v.0);
-    // executor::block_on(fuzz(remapped, 4));
-    Runtime::new().unwrap().block_on(fuzz(remapped, 4));
+    Runtime::new().unwrap().block_on(fuzz(remapped, 4, 30));
 });

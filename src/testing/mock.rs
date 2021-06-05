@@ -17,6 +17,7 @@ use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     hash::Hasher as StdHasher,
     io::{Read, Result, Write},
+    mem,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -406,14 +407,22 @@ impl NetworkDataEncoderDecoder {
     }
 
     pub fn encode_into<W: Write>(&self, data: NetworkData, writer: &mut W) -> Result<()> {
-        writer.write_all(&data.encode()[..])
+        let data: Vec<u8> = data.encode();
+        let size = data.len();
+        writer.write_all(&size.to_le_bytes()[..])?;
+        writer.write_all(&data[..])
     }
 
     pub fn decode_from<R: Read>(
         &self,
         reader: &mut R,
     ) -> core::result::Result<NetworkData, codec::Error> {
-        let mut reader = IoReader(reader);
+        let mut size_bytes = [0u8; mem::size_of::<usize>()];
+        reader.read_exact(&mut size_bytes[..])?;
+        let size = usize::from_le_bytes(size_bytes);
+        let mut net_data = vec![0; size];
+        reader.read_exact(&mut net_data[..])?;
+        let mut reader = IoReader(&net_data[..]);
         <NetworkData>::decode(&mut reader)
     }
 }

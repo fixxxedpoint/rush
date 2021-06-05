@@ -5,7 +5,7 @@ use crate::{
 };
 use codec::{Decode, Encode};
 use futures::{channel::oneshot, FutureExt, StreamExt};
-use log::error;
+use log::{error, info};
 use std::fmt::Debug;
 
 /// Network represents an interface for sending and receiving NetworkData.
@@ -145,7 +145,10 @@ impl<H: Hasher, D: Data, S: Encode + Decode, N: Network<H, D, S>> NetworkHub<H, 
                         break;
                     }
                 },
-                _ = exit.next() => break,
+                _ = exit.next() => {
+                    info!(target: "network-hub", "Network stopped externally.");
+                    break;
+                },
             }
         }
     }
