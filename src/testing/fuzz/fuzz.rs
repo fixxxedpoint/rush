@@ -37,7 +37,7 @@ async fn load_fuzz_corpus() {
 
 async fn load_fuzz(path: &Path, n_members: usize) {
     let reader = BufReader::new(File::open(path).expect("unable to open a corpus file"));
-    let data_iter = NetworkDataIterator::new(reader);
+    let data_iter = NetworkDataIterator::new(reader).collect();
     fuzz(data_iter, n_members, 30).await;
 }
 
@@ -119,15 +119,11 @@ fn after_iter<'a, I>(
     })
 }
 
-pub async fn fuzz(
-    data: impl Iterator<Item = ND> + Send + 'static,
-    n_members: usize,
-    n_batches: usize,
-) {
+pub async fn fuzz(data: Vec<ND>, n_members: usize, n_batches: usize) {
     const NETWORK_DELAY: u64 = 200;
     let spawner = Spawner::new();
     let (empty_tx, empty_rx) = oneshot::channel();
-    let data = after_iter(data, move || {
+    let data = after_iter(data.into_iter(), move || {
         empty_tx.send(()).expect("empty_rx was already closed");
     });
 
