@@ -137,8 +137,17 @@ pub async fn fuzz(
 
     empty_rx.await.expect("empty_tx was unexpectedly dropped");
 
-    for _ in 0..n_batches {
-        batch_rx.next().await.expect("unable to retrieve a batch");
+    let mut batches_count = 0;
+    loop {
+        match batch_rx.next().await {
+            Some(_) => {
+                batches_count += 1;
+            }
+            None => break,
+        }
+    }
+    if n_batches != batches_count {
+        info!(target: "rush", "Expected {:?} batches, received {:?}", n_batches, batches_count);
     }
 
     exit_tx
@@ -200,7 +209,6 @@ impl<I: Iterator<Item = ND> + Send> Network<Hasher64, Data, Signature> for Recor
         _: NetworkData<Hasher64, Data, Signature>,
         _: NodeIndex,
     ) -> std::result::Result<(), Self::Error> {
-        panic!("elo z sieci 3");
         Ok(())
     }
 

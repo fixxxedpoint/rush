@@ -3,7 +3,7 @@ use futures::{
     channel::{mpsc, oneshot},
     FutureExt, StreamExt,
 };
-use log::{debug, error};
+use log::{debug, error, info};
 use rand::Rng;
 
 use crate::{
@@ -768,5 +768,10 @@ where
         let _ = consensus_exit.send(());
         let _ = alerter_exit.send(());
         let _ = network_exit.send(());
+    }
+
+    fn exit(&self) {
+        info!(target: "rush-member", "{:?} Closed by external request.", self.index());
+        panic!("early exit");
     }
 }
