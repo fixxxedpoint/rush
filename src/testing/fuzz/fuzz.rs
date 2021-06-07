@@ -124,6 +124,7 @@ pub async fn fuzz(data: Vec<ND>, n_members: usize, n_batches: usize) {
     let spawner = Spawner::new();
     let (empty_tx, empty_rx) = oneshot::channel();
     let data = after_iter(data.into_iter(), move || {
+        // panic!("wot");
         empty_tx.send(()).expect("empty_rx was already closed");
     });
 

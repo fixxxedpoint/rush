@@ -676,7 +676,8 @@ where
                 sh,
                 exit_stream,
             )
-            .await
+            .await;
+            // panic!("wot1");
         });
         self.tx_consensus = Some(tx_consensus);
         let (alert_messages_for_alerter, alert_messages_from_network) = mpsc::unbounded();
@@ -765,9 +766,12 @@ where
         }
         debug!(target: "AlephBFT-member", "{:?} Ending run.", self.index());
 
+        // let _ = consensus_exit.send(()).unwrap();
+        // let _ = network_exit.send(()).unwrap();
         let _ = consensus_exit.send(());
         let _ = alerter_exit.send(());
         let _ = network_exit.send(());
+        // panic!("wot2");
     }
 
     fn exit(&self) {
