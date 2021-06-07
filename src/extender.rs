@@ -1,7 +1,7 @@
-use futures::{channel::oneshot, FutureExt, StreamExt};
+use futures::{channel::oneshot, StreamExt};
 use std::collections::{HashMap, VecDeque};
 
-use log::{debug, error};
+use log::debug;
 
 use crate::{
     nodes::{NodeCount, NodeIndex, NodeMap},
@@ -92,7 +92,7 @@ impl<H: Hasher> Extender<H> {
     }
 
     fn add_unit(&mut self, u: ExtenderUnit<H>) {
-        debug!(target: "rush-extender", "{:?} New unit in Extender round {:?} creator {:?} hash {:?}.", self.node_id, u.round, u.creator, u.hash);
+        debug!(target: "AlephBFT-extender", "{:?} New unit in Extender round {:?} creator {:?} hash {:?}.", self.node_id, u.round, u.creator, u.hash);
         let round = u.round;
         if round > self.state.highest_round {
             self.state.highest_round = round;
@@ -132,7 +132,7 @@ impl<H: Hasher> Extender<H> {
     }
 
     /// Prepares a batch and removes all unnecessary units from the data structures
-    fn finalize_round(&mut self, round: Round, head: &H::Hash) {
+    fn finalize_round(&mut self, round: Round, head: &H::Hash) -> Result<(), ()> {
         let mut batch = vec![];
         let mut queue = VecDeque::new();
         queue.push_back(self.units.remove(head).unwrap());
@@ -148,12 +148,16 @@ impl<H: Hasher> Extender<H> {
 
         // We reverse for the batch to start with least recent units.
         batch.reverse();
-        let send_result = self.finalizer_tx.unbounded_send(batch);
-        if let Err(e) = send_result {
-            error!(target: "rush-extender", "{:?} Unable to send a batch to Finalizer: {:?}.", self.node_id, e);
-        }
-        debug!(target: "rush-extender", "{:?} Finalized round {:?} with head {:?}.", self.node_id, round, head);
+        self.finalizer_tx
+            .unbounded_send(batch)
+            .map_err(|e| {
+                debug!(target: "AlephBFT-extender", "{:?} channel for batches is closed {:?}, closing", self.node_id, e);
+            })?;
+
+        debug!(target: "AlephBFT-extender", "{:?} Finalized round {:?} with head {:?}.", self.node_id, round, head);
         self.units_by_round[round].clear();
+
+        Ok(())
     }
 
     fn vote_and_decision(
@@ -212,7 +216,7 @@ impl<H: Hasher> Extender<H> {
     }
 
     // Tries to make progress in extending the partial order after adding a new unit to the Dag.
-    fn progress(&mut self, u_new_hash: H::Hash) {
+    fn progress(&mut self, u_new_hash: H::Hash) -> Result<(), ()> {
         loop {
             if !self.state.round_initialized {
                 if self.state.highest_round >= self.state.current_round + 3 {
@@ -266,7 +270,7 @@ impl<H: Hasher> Extender<H> {
             }
 
             if decision == Some(true) {
-                self.finalize_round(self.state.current_round, &candidate_hash);
+                self.finalize_round(self.state.current_round, &candidate_hash)?;
                 self.state.current_round += 1;
                 self.state.round_initialized = false;
                 continue;
@@ -280,19 +284,23 @@ impl<H: Hasher> Extender<H> {
             self.state.votes_up_to_date = true;
             break;
         }
+        Ok(())
     }
 
-    pub(crate) async fn extend(&mut self, exit: oneshot::Receiver<()>) {
-        let mut exit = exit.into_stream();
+    pub(crate) async fn extend(&mut self, mut exit: oneshot::Receiver<()>) {
         loop {
-            tokio::select! {
-                Some(v) = self.electors.next() =>{
-                    let v_hash = v.hash;
-                    self.add_unit(v);
-                    self.progress(v_hash);
+            futures::select! {
+                v = self.electors.next() => {
+                    if let Some(v) = v {
+                        let v_hash = v.hash;
+                        self.add_unit(v);
+                        if self.progress(v_hash).is_err(){
+                            break
+                        }
+                    }
                 }
-                _ = exit.next() => {
-                    debug!(target: "rush-extender", "{:?} received exit signal.", self.node_id);
+                _ = &mut exit => {
+                    debug!(target: "AlephBFT-extender", "{:?} received exit signal.", self.node_id);
                     break
                 }
             }
@@ -327,7 +335,7 @@ mod tests {
         )
     }
 
-    #[tokio::test(max_threads = 3)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn finalize_rounds_01() {
         let n_members = 4;
         let rounds = 6;
@@ -341,7 +349,9 @@ mod tests {
         for round in 0..rounds {
             for creator in 0..n_members {
                 let unit = construct_unit(creator, round, n_members);
-                let _ = electors_tx.unbounded_send(unit);
+                electors_tx
+                    .unbounded_send(unit)
+                    .expect("Channel should be open");
             }
         }
         let batch_round_0 = batch_rx.next().await.unwrap();

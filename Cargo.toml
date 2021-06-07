@@ -1,25 +1,33 @@
 [package]
-name = "rush"
-version = "0.2.0"
-authors = ["Cardinal Cryptography"]
+name = "aleph-bft"
+version = "0.3.1"
 edition = "2018"
+authors = ["Cardinal Cryptography"]
+categories = ["algorithms", "data-structures", "cryptography", "database"]
+documentation = "https://docs.rs/?"
+homepage = "https://alephzero.org"
+repository = "https://github.com/cardinal-cryptography/?"
+keywords = ["asynchronous", "consensus", "bft", "blockchain", "distributed-systems"]
+license = "Apache-2.0"
+readme = "README.md"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = """AlephBFT is an asynchronous and Byzantine fault tolerant consensus protocol aimed at ordering arbitrary messages (transactions). It has been designed to continuously operate even in the harshest conditions: with no bounds on message-delivery delays and in the presence of malicious actors. This makes it an excellent fit for blockchain-related applications."""
 
 [dependencies]
 bit-vec = "0.6"
-parking_lot = "0.11.1"
-futures = "0.3.9"
-tokio = { version = "0.2.21", features = ["macros", "rt-threaded", "time"] }
-mini-redis = "0.4"
-derive_more = "0.99.7"
-serde = { version = "1.0.110", features = ["derive"] }
-futures-timer = "3.0.2"
-log = "0.4.14"
-env_logger = "0.8.3"
-codec = { package = "parity-scale-codec", version = "2", default-features = false, features = ["derive", "std"] }
-rand = "0.8.3"
-async-trait = "0"
+futures = "0.3"
+futures-timer = "3.0"
+derive_more = "0.99"
+log = "0.4"
+rand = "0.8"
+async-trait = "0.1"
+codec = { package = "parity-scale-codec", version = "2", default-features = false, features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1.6.1", features = ["macros", "rt", "rt-multi-thread"] }
+libp2p = { version ="0.38", features = ["mdns", "tcp-tokio"]}
+parking_lot = "0.11"
+env_logger = "0.8"
 
 [features]
 fuzz = []

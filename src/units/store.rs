@@ -1,7 +1,5 @@
 use super::*;
 
-pub(crate) const MAX_ROUND: usize = 5000;
-
 pub(crate) struct UnitStore<'a, H: Hasher, D: Data, KB: KeyBox> {
     by_coord: HashMap<UnitCoord, SignedUnit<'a, H, D, KB>>,
     by_hash: HashMap<H::Hash, SignedUnit<'a, H, D, KB>>,
@@ -13,20 +11,22 @@ pub(crate) struct UnitStore<'a, H: Hasher, D: Data, KB: KeyBox> {
     n_units_per_round: Vec<NodeCount>,
     is_forker: NodeMap<bool>,
     legit_buffer: Vec<SignedUnit<'a, H, D, KB>>,
+    max_round: usize,
 }
 
 impl<'a, H: Hasher, D: Data, KB: KeyBox> UnitStore<'a, H, D, KB> {
-    pub(crate) fn new(n_nodes: NodeCount, threshold: NodeCount) -> Self {
+    pub(crate) fn new(n_nodes: NodeCount, threshold: NodeCount, max_round: usize) -> Self {
         UnitStore {
             by_coord: HashMap::new(),
             by_hash: HashMap::new(),
             parents: HashMap::new(),
             round_in_progress: 0,
             threshold,
-            n_units_per_round: vec![NodeCount(0); MAX_ROUND + 1],
+            n_units_per_round: vec![NodeCount(0); max_round + 1],
             // is_forker is initialized with default values for bool, i.e., false
             is_forker: NodeMap::new_with_len(n_nodes),
             legit_buffer: Vec::new(),
+            max_round,
         }
     }
 
@@ -96,14 +96,14 @@ impl<'a, H: Hasher, D: Data, KB: KeyBox> UnitStore<'a, H, D, KB> {
     // The returned vector is sorted w.r.t. increasing rounds. Units of higher round created by this node are removed from store.
     pub(crate) fn mark_forker(&mut self, forker: NodeIndex) -> Vec<SignedUnit<'a, H, D, KB>> {
         if self.is_forker[forker] {
-            error!(target: "unit-store", "Trying to mark the node {:?} as forker for the second time.", forker);
+            error!(target: "AlephBFT-unit-store", "Trying to mark the node {:?} as forker for the second time.", forker);
         }
         self.is_forker[forker] = true;
         let forkers_units = (0..=self.round_in_progress)
             .filter_map(|r| self.unit_by_coord(UnitCoord::new(r, forker)).cloned())
             .collect();
 
-        for round in self.round_in_progress + 1..=MAX_ROUND {
+        for round in self.round_in_progress + 1..=self.max_round {
             let coord = UnitCoord::new(round, forker);
             if let Some(su) = self.unit_by_coord(coord).cloned() {
                 // We get rid of this unit. This is safe because it has not been sent to Consensus yet.
@@ -111,7 +111,7 @@ impl<'a, H: Hasher, D: Data, KB: KeyBox> UnitStore<'a, H, D, KB> {
                 // units in the store and the only way this forker's unit is sent to Consensus is when
                 // it arrives in an alert for the *first* time.
                 // If we didn't do that, then there would be some awkward issues with duplicates.
-                debug!(target: "unit-store", "Removing unit from forker {:?}  {:?}.", coord, su.as_signable());
+                debug!(target: "AlephBFT-unit-store", "Removing unit from forker {:?}  {:?}.", coord, su.as_signable());
                 self.by_coord.remove(&coord);
                 let hash = su.as_signable().hash();
                 self.by_hash.remove(&hash);
@@ -128,7 +128,7 @@ impl<'a, H: Hasher, D: Data, KB: KeyBox> UnitStore<'a, H, D, KB> {
         let creator = su.as_signable().creator();
 
         if alert {
-            debug!(target: "unit-store", "Adding unit with alert {:?}.", su.as_signable());
+            debug!(target: "AlephBFT-unit-store", "Adding unit with alert {:?}.", su.as_signable());
             assert!(
                 self.is_forker[creator],
                 "The forker must be marked before adding alerted units."
@@ -136,7 +136,7 @@ impl<'a, H: Hasher, D: Data, KB: KeyBox> UnitStore<'a, H, D, KB> {
         }
         if self.contains_hash(&hash) {
             // Ignoring a duplicate.
-            debug!(target: "unit-store", "A unit ignored as a duplicate {:?}.", su.as_signable());
+            debug!(target: "AlephBFT-unit-store", "A unit ignored as a duplicate {:?}.", su.as_signable());
             return;
         }
         self.by_hash.insert(hash, su.clone());
@@ -166,6 +166,6 @@ impl<'a, H: Hasher, D: Data, KB: KeyBox> UnitStore<'a, H, D, KB> {
     }
 
     pub(crate) fn limit_per_node(&self) -> Round {
-        MAX_ROUND
+        self.max_round
     }
 }

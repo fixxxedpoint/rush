@@ -1,8 +1,18 @@
 #[cfg(test)]
-pub mod byzantine;
+mod byzantine;
 #[cfg(test)]
-pub mod crash;
+mod consensus;
+#[cfg(test)]
+mod crash;
+#[cfg(test)]
+mod dag;
 #[cfg(any(feature = "fuzz", test))]
 pub mod fuzz;
 #[cfg(any(feature = "fuzz", test))]
 pub mod mock;
+#[cfg(test)]
+mod rmc;
+#[cfg(test)]
+pub(crate) mod signed;
+#[cfg(test)]
+mod unreliable;

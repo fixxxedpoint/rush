@@ -2,8 +2,6 @@ use codec::{Decode, Encode, IoReader};
 use log::{debug, error};
 use parking_lot::Mutex;
 
-use tokio::task::yield_now;
-
 use futures::{
     channel::{
         mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
@@ -25,11 +23,14 @@ use std::{
 };
 
 use crate::{
-    member::{Config, NotificationIn, NotificationOut},
-    network::NetworkDataInner,
+    alerts,
+    config::{exponential_slowdown, Config, DelayConfig},
+    member::{NotificationIn, NotificationOut},
+    network,
     units::{Unit, UnitCoord},
-    DataIO as DataIOT, Hasher, Index, KeyBox as KeyBoxT, Network as NetworkT,
-    NetworkData as NetworkDataT, NodeCount, NodeIndex, OrderedBatch, SpawnHandle,
+    DataIO as DataIOT, Hasher, Index, KeyBox as KeyBoxT, MultiKeychain as MultiKeychainT,
+    Network as NetworkT, NodeCount, NodeIndex, OrderedBatch,
+    PartialMultisignature as PartialMultisignatureT, SpawnHandle,
 };
 
 use crate::member::Member;
@@ -55,6 +56,8 @@ impl Hasher for Hasher64 {
         hasher.finish().to_ne_bytes()
     }
 }
+
+pub(crate) type Hash64 = <Hasher64 as Hasher>::Hash;
 
 // This struct allows to create a Hub to interconnect several instances of the Consensus engine, without
 // requiring the Member wrapper. The Hub notifies all connected instances about newly created units and
@@ -99,7 +102,7 @@ impl HonestHub {
             "Must connect to all nodes before running the hub."
         );
         for (_ix, tx) in self.ntfct_in_txs.iter() {
-            tx.unbounded_send(ntfct.clone()).unwrap();
+            tx.unbounded_send(ntfct.clone()).ok();
         }
     }
 
@@ -108,7 +111,7 @@ impl HonestHub {
             .ntfct_in_txs
             .get(&node_ix)
             .expect("Must connect to all nodes before running the hub.");
-        let _ = tx.unbounded_send(ntfct);
+        tx.unbounded_send(ntfct).expect("Channel should be open");
     }
 
     fn on_notification(&mut self, node_ix: NodeIndex, ntfct: NotificationOut<Hasher64>) {
@@ -120,7 +123,7 @@ impl HonestHub {
                 self.units_by_coord.insert(coord, u.clone());
                 self.send_to_all(NotificationIn::NewUnits(vec![u]));
             }
-            NotificationOut::MissingUnits(coords, _aux_data) => {
+            NotificationOut::MissingUnits(coords) => {
                 let mut response_units = Vec::new();
                 for coord in coords {
                     match self.units_by_coord.get(&coord) {
@@ -180,7 +183,7 @@ impl Future for HonestHub {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub(crate) struct Spawner {
     handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
@@ -204,7 +207,7 @@ impl Spawner {
     }
 }
 
-pub type NetworkData = NetworkDataT<Hasher64, Data, Signature>;
+pub type NetworkData = crate::NetworkData<Hasher64, Data, Signature, PartialMultisignature>;
 type NetworkReceiver = UnboundedReceiver<(NetworkData, NodeIndex)>;
 type NetworkSender = UnboundedSender<(NetworkData, NodeIndex)>;
 
@@ -216,7 +219,7 @@ pub(crate) struct Network {
 }
 
 #[async_trait::async_trait]
-impl NetworkT<Hasher64, Data, Signature> for Network {
+impl NetworkT<Hasher64, Data, Signature, PartialMultisignature> for Network {
     type Error = ();
 
     fn broadcast(&self, data: NetworkData) -> core::result::Result<(), Self::Error> {
@@ -338,27 +341,38 @@ impl NetworkHook for NoOpHook {
 
 #[derive(Clone)]
 pub(crate) struct AlertHook {
-    alert_count: Arc<Mutex<usize>>,
+    alerts_sent_by_connection: Arc<Mutex<HashMap<(NodeIndex, NodeIndex), usize>>>,
 }
 
 impl AlertHook {
     pub(crate) fn new() -> Self {
         AlertHook {
-            alert_count: Arc::new(Mutex::new(0)),
+            alerts_sent_by_connection: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub(crate) fn count(&self) -> usize {
-        *self.alert_count.lock()
+    pub(crate) fn count(&self, sender: NodeIndex, recipient: NodeIndex) -> usize {
+        match self
+            .alerts_sent_by_connection
+            .lock()
+            .get(&(sender, recipient))
+        {
+            Some(count) => *count,
+            None => 0,
+        }
     }
 }
 
 impl NetworkHook for AlertHook {
-    fn update_state(&mut self, data: NetworkData, _: NodeIndex, _: NodeIndex) {
-        use NetworkDataInner::*;
-        if let NetworkDataT(Alert(_)) = data {
-            let mut alert_count = self.alert_count.lock();
-            *alert_count += 1;
+    fn update_state(&self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex) {
+        use alerts::AlertMessage::*;
+        use network::NetworkDataInner::*;
+        if let crate::NetworkData(Alert(ForkAlert(_))) = data {
+            *self
+                .alerts_sent_by_connection
+                .lock()
+                .entry((sender, recipient))
+                .or_insert(0) += 1;
         }
     }
 }
@@ -457,6 +471,25 @@ impl Data {
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Signature {}
 
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub(crate) struct PartialMultisignature {
+    signed_by: Vec<NodeIndex>,
+}
+
+impl PartialMultisignatureT for PartialMultisignature {
+    type Signature = Signature;
+    fn add_signature(self, _: &Self::Signature, index: NodeIndex) -> Self {
+        let Self { mut signed_by } = self;
+        for id in &signed_by {
+            if *id == index {
+                return Self { signed_by };
+            }
+        }
+        signed_by.push(index);
+        Self { signed_by }
+    }
+}
+
 pub(crate) struct DataIO {
     ix: NodeIndex,
     round_counter: Cell<usize>,
@@ -470,7 +503,13 @@ impl DataIOT<Data> for DataIO {
         self.round_counter.set(self.round_counter.get() + 1);
         Data { coord, variant: 0 }
     }
-    fn send_ordered_batch(&mut self, data: OrderedBatch<Data>) -> core::result::Result<(), ()> {
+    fn check_availability(
+        &self,
+        _: &Data,
+    ) -> Option<Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send>>> {
+        None
+    }
+    fn send_ordered_batch(&mut self, data: OrderedBatch<Data>) -> Result<(), ()> {
         self.tx.unbounded_send(data).map_err(|e| {
             error!(target: "data-io", "Error when sending data from DataIO {:?}.", e);
         })
@@ -489,13 +528,15 @@ impl DataIO {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct KeyBox {
+    count: NodeCount,
     ix: NodeIndex,
 }
 
 impl KeyBox {
-    pub(crate) fn new(ix: NodeIndex) -> Self {
-        KeyBox { ix }
+    pub(crate) fn new(count: NodeCount, ix: NodeIndex) -> Self {
+        KeyBox { count, ix }
     }
 }
 
@@ -515,16 +556,38 @@ impl KeyBoxT for KeyBox {
     }
 }
 
-fn gen_config(ix: NodeIndex, n_members: NodeCount) -> Config {
-    Config {
-        node_id: ix,
-        session_id: 0,
-        n_members,
-        create_lag: Duration::from_millis(100),
+impl MultiKeychainT for KeyBox {
+    type PartialMultisignature = PartialMultisignature;
+    fn from_signature(&self, _: &Self::Signature, index: NodeIndex) -> Self::PartialMultisignature {
+        let signed_by = vec![index];
+        PartialMultisignature { signed_by }
+    }
+    fn is_complete(&self, _: &[u8], partial: &Self::PartialMultisignature) -> bool {
+        (self.count * 2) / 3 < NodeCount(partial.signed_by.len())
     }
 }
 
-pub(crate) type HonestMember<'a> = Member<'a, Hasher64, Data, DataIO, KeyBox>;
+pub(crate) fn gen_config(node_ix: NodeIndex, n_members: NodeCount) -> Config {
+    let delay_config = DelayConfig {
+        tick_interval: Duration::from_millis(5),
+        requests_interval: Duration::from_millis(50),
+        unit_broadcast_delay: Arc::new(|t| exponential_slowdown(t, 100.0, 1, 3.0)),
+        //100, 100, 300, 900, 2700, ...
+        unit_creation_delay: Arc::new(|t| exponential_slowdown(t, 50.0, usize::MAX, 1.000)),
+        //50, 50, 50, 50, ...
+    };
+    Config {
+        node_ix,
+        session_id: 0,
+        n_members,
+        delay_config,
+        rounds_margin: 200,
+        max_units_per_alert: 200,
+        max_round: 5000,
+    }
+}
+
+pub(crate) type HonestMember<'a> = Member<'a, Hasher64, Data, DataIO, KeyBox, Spawner>;
 
 pub(crate) fn configure_network(
     n_members: usize,
@@ -554,9 +617,9 @@ pub(crate) fn spawn_honest_member<N: 'static + NetworkT<Hasher64, Data, Signatur
     let (exit_tx, exit_rx) = oneshot::channel();
     let spawner_inner = spawner.clone();
     let member_task = async move {
-        let keybox = KeyBox::new(node_index);
-        let member = HonestMember::new(data_io, &keybox, config);
-        member.run_session(network, spawner_inner, exit_rx).await;
+        let keybox = KeyBox::new(NodeCount(n_members), node_index);
+        let member = HonestMember::new(data_io, &keybox, config, spawner_inner.clone());
+        member.run_session(network, exit_rx).await;
     };
     spawner.spawn("member", member_task);
     (rx_batch, exit_tx)

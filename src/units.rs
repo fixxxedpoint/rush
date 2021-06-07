@@ -9,7 +9,7 @@ use std::{cell::RefCell, collections::HashMap, hash::Hash as StdHash};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Encode, Decode, StdHash)]
 pub(crate) struct UnitCoord {
-    round: u16,
+    pub(crate) round: u16,
     creator: NodeIndex,
 }
 
@@ -40,7 +40,7 @@ pub(crate) struct ControlHash<H: Hasher> {
 
 impl<H: Hasher> ControlHash<H> {
     pub(crate) fn new(parent_map: &NodeMap<Option<H::Hash>>) -> Self {
-        let hash = Self::combine_hashes(&parent_map);
+        let hash = Self::combine_hashes(parent_map);
         let parents = parent_map.iter().map(Option::is_some).collect();
 
         ControlHash {
@@ -92,9 +92,11 @@ impl<H: Hasher> PreUnit<H> {
     pub(crate) fn creator(&self) -> NodeIndex {
         self.coord.creator()
     }
+
     pub(crate) fn round(&self) -> Round {
         self.coord.round()
     }
+
     pub(crate) fn control_hash(&self) -> &ControlHash<H> {
         &self.control_hash
     }
@@ -137,13 +139,13 @@ impl<H: Hasher, D: Data> FullUnit<H, D> {
         self.pre_unit.round()
     }
     pub(crate) fn control_hash(&self) -> &ControlHash<H> {
-        &self.pre_unit.control_hash()
+        self.pre_unit.control_hash()
     }
     pub(crate) fn coord(&self) -> UnitCoord {
         self.pre_unit.coord
     }
-    pub(crate) fn data(&self) -> D {
-        self.data.clone()
+    pub(crate) fn data(&self) -> &D {
+        &self.data
     }
     pub(crate) fn session_id(&self) -> SessionId {
         self.session_id
@@ -161,6 +163,10 @@ impl<H: Hasher, D: Data> FullUnit<H, D> {
     }
     pub(crate) fn unit(&self) -> Unit<H> {
         Unit::new(self.pre_unit.clone(), self.hash())
+    }
+    #[cfg(test)]
+    pub(crate) fn set_round(&mut self, round: Round) {
+        self.pre_unit.coord.round = round as u16
     }
 }
 
