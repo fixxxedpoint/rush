@@ -17,7 +17,7 @@ codec = { package = "parity-scale-codec", version = "2", default-features = fals
 tokio = { version = "0.2.21", features = ["macros", "rt-threaded", "time"] }
 log = "0.4.14"
 # arbitrary = { version = "0.2.0", optional = true }
-rush = { path = "..", features = ["fuzz"] }
+aleph-bft = { path = "..", features = ["fuzz"] }
 
 # [dependencies.rush]
 # path = ".."

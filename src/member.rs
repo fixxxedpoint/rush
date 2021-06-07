@@ -761,7 +761,7 @@ where
                     self.trigger_tasks();
                     ticker = Delay::new(ticker_delay).fuse();
                 },
-                _ = exit.next() => {
+                _ = &mut exit => {
                     // self.exit();
                     info!(target: "rush-member", "{:?} Closed by external request.", self.index());
                     break;

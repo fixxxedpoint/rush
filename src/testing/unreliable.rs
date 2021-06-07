@@ -19,7 +19,7 @@ struct CorruptPacket {
 }
 
 impl NetworkHook for CorruptPacket {
-    fn update_state(&self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex) {
+    fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex) {
         if self.recipient != recipient || self.sender != sender {
             return;
         }
@@ -40,7 +40,7 @@ struct NoteRequest {
 }
 
 impl NetworkHook for NoteRequest {
-    fn update_state(&self, data: &mut NetworkData, sender: NodeIndex, _: NodeIndex) {
+    fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, _: NodeIndex) {
         use NetworkDataInner::Units;
         use UnitMessage::RequestCoord;
         if sender == self.sender {
@@ -49,6 +49,14 @@ impl NetworkHook for NoteRequest {
                     *self.requested.lock() = true;
                 }
             }
+        }
+    }
+}
+
+impl<I: Iterator<Item = Box<dyn NetworkHook>> + Send> NetworkHook for I {
+    fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex) {
+        for mut hook in self {
+            hook.update_state(data, sender, recipient);
         }
     }
 }
@@ -62,22 +70,23 @@ async fn request_missing_coord() {
     let censoring_node = 1.into();
     let censoring_round = 5;
 
-    let (net_hub, mut networks) = configure_network(n_members, 1.0);
-    net_hub.add_hook(CorruptPacket {
+    let mut hooks: Vec<Box<dyn NetworkHook>> = vec![];
+    hooks.push(Box::new(CorruptPacket {
         recipient: censored_node,
         sender: censoring_node,
         creator: censoring_node,
         round: censoring_round,
-    });
+    }));
     let requested = Arc::new(Mutex::new(false));
-    net_hub.add_hook(NoteRequest {
+    hooks.push(Box::new(NoteRequest {
         sender: censored_node,
         creator: censoring_node,
         round: censoring_round,
         requested: requested.clone(),
-    });
+    }));
+    let (mut net_hub, mut networks) = configure_network(n_members, 1.0, hooks.into_iter());
     let spawner = Spawner::new();
-    spawner.spawn("network-hub", net_hub);
+    spawner.spawn("network-hub", async move { net_hub.run().await });
 
     let mut exits = vec![];
     let mut batch_rxs = Vec::new();

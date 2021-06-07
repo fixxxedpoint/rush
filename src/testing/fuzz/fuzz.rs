@@ -14,21 +14,21 @@ use crate::{
     nodes::NodeIndex,
     testing::mock::{
         new_for_peer_id, spawn_honest_member, Data, Hasher64, NetworkData as ND,
-        NetworkDataEncoderDecoder, Signature,
+        NetworkDataEncoderDecoder, PartialMultisignature, Signature,
     },
     Network, NetworkData, SpawnHandle,
 };
 
 use crate::testing::mock::{configure_network, EvesDroppingHook, Spawner};
 
-#[tokio::test(max_threads = 1)]
+#[tokio::test]
 #[ignore]
 async fn generate_fuzz_corpus() {
     let fuzz_output = Path::new("fuzz.corpus");
     generate_fuzz(fuzz_output, 4, 30).await
 }
 
-#[tokio::test(max_threads = 1)]
+#[tokio::test]
 #[ignore]
 async fn load_fuzz_corpus() {
     let fuzz_input = Path::new("fuzz.corpus");
@@ -198,12 +198,14 @@ impl<I: Iterator<Item = ND> + Send> RecorderNetwork<I> {
 }
 
 #[async_trait::async_trait]
-impl<I: Iterator<Item = ND> + Send> Network<Hasher64, Data, Signature> for RecorderNetwork<I> {
+impl<I: Iterator<Item = ND> + Send> Network<Hasher64, Data, Signature, PartialMultisignature>
+    for RecorderNetwork<I>
+{
     type Error = ();
 
     fn send(
         &self,
-        _: NetworkData<Hasher64, Data, Signature>,
+        _: NetworkData<Hasher64, Data, Signature, PartialMultisignature>,
         _: NodeIndex,
     ) -> std::result::Result<(), Self::Error> {
         Ok(())
@@ -211,12 +213,14 @@ impl<I: Iterator<Item = ND> + Send> Network<Hasher64, Data, Signature> for Recor
 
     fn broadcast(
         &self,
-        _: NetworkData<Hasher64, Data, Signature>,
+        _: NetworkData<Hasher64, Data, Signature, PartialMultisignature>,
     ) -> std::result::Result<(), Self::Error> {
         Ok(())
     }
 
-    async fn next_event(&mut self) -> Option<NetworkData<Hasher64, Data, Signature>> {
+    async fn next_event(
+        &mut self,
+    ) -> Option<NetworkData<Hasher64, Data, Signature, PartialMultisignature>> {
         (&mut self.next_delay).await;
         self.next_delay.reset(self.delay);
         self.data.next()
