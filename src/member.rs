@@ -768,6 +768,7 @@ where
         let sh = spawn_handle.clone();
         debug!(target: "rush-member", "{:?} Spawning party for a session with config {:?}", self.index(), self.config);
         spawn_handle.spawn("member/consensus", async move {
+            // panic!("wot1");
             consensus::run(
                 config,
                 consensus_stream,
@@ -776,7 +777,8 @@ where
                 sh,
                 exit_stream,
             )
-            .await
+            .await;
+            // panic!("wot1");
         });
         self.tx_consensus = Some(tx_consensus);
         let (alert_sink, mut incoming_alerts) = mpsc::unbounded();
@@ -831,7 +833,7 @@ where
 
                 _ = ticker.tick() => self.trigger_tasks(),
                 _ = exit.next() => {
-                    self.exit();
+                    // self.exit();
                     info!(target: "rush-member", "{:?} Closed by external request.", self.index());
                     break;
                 },
@@ -839,8 +841,11 @@ where
             self.move_units_to_consensus();
         }
 
+        // let _ = consensus_exit.send(()).unwrap();
+        // let _ = network_exit.send(()).unwrap();
         let _ = consensus_exit.send(());
         let _ = network_exit.send(());
+        // panic!("wot2");
     }
 
     fn exit(&self) {
