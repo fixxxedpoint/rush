@@ -10,6 +10,7 @@ use futures::{
         mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
         oneshot,
     },
+    future::poll_fn,
     Future, StreamExt,
 };
 use log::{debug, error};
@@ -19,7 +20,7 @@ use std::{
     cell::Cell,
     collections::{hash_map::DefaultHasher, HashMap},
     hash::Hasher as StdHasher,
-    io::{Read, Result, Write},
+    io::{Read, Result as IOResult, Write},
     mem,
     pin::Pin,
     sync::Arc,
@@ -310,14 +311,14 @@ impl<Hook: NetworkHook> UnreliableRouter<Hook> {
             for peer_id in disconnected_peers.drain(..) {
                 self.peers.remove(&peer_id);
             }
-            for (sender, (data, recipient)) in buffer.drain(..) {
+            for (sender, (mut data, recipient)) in buffer.drain(..) {
                 let rand_sample = rand::random::<f64>();
                 if rand_sample > self.reliability {
                     debug!("Simulated network fail.");
                     continue;
                 }
                 if let Some(peer) = self.peers.get_mut(&recipient) {
-                    self.hook.update_state(data.clone(), sender, recipient);
+                    self.hook.update_state(&mut data, sender, recipient);
                     peer.tx
                         .unbounded_send((data, sender))
                         .expect("channel should be open");
@@ -328,8 +329,21 @@ impl<Hook: NetworkHook> UnreliableRouter<Hook> {
     }
 }
 
+async fn yield_now() {
+    let mut yielded = false;
+    poll_fn(move |cx: &mut Context<'_>| -> Poll<()> {
+        if yielded {
+            return Poll::Ready(());
+        }
+        yielded = true;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    })
+    .await
+}
+
 pub(crate) trait NetworkHook: Send {
-    fn update_state(&mut self, data: NetworkData, sender: NodeIndex, recipient: NodeIndex);
+    fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex);
 }
 
 pub(crate) struct NoOpHook(());
@@ -341,7 +355,7 @@ impl NoOpHook {
 }
 
 impl NetworkHook for NoOpHook {
-    fn update_state(&mut self, _: NetworkData, _: NodeIndex, _: NodeIndex) {}
+    fn update_state(&mut self, _: &mut NetworkData, _: NodeIndex, _: NodeIndex) {}
 }
 
 #[derive(Clone)]
@@ -369,7 +383,7 @@ impl AlertHook {
 }
 
 impl NetworkHook for AlertHook {
-    fn update_state(&self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex) {
+    fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex) {
         use alerts::AlertMessage::*;
         use network::NetworkDataInner::*;
         if let crate::NetworkData(Alert(ForkAlert(_))) = data {
@@ -403,7 +417,7 @@ pub(crate) fn new_for_peer_id<IH>(
 impl<IH: NetworkHook, F: FnMut(&NetworkData, &NodeIndex, &NodeIndex) -> bool + Send> NetworkHook
     for FilteringHook<IH, F>
 {
-    fn update_state(&mut self, data: NetworkData, sender: NodeIndex, recipient: NodeIndex) {
+    fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex) {
         if (self.filter)(&data, &sender, &recipient) {
             self.wrapped.update_state(data, sender, recipient);
         }
@@ -425,7 +439,7 @@ impl NetworkDataEncoderDecoder {
         NetworkDataEncoderDecoder {}
     }
 
-    pub fn encode_into<W: Write>(&self, data: NetworkData, writer: &mut W) -> Result<()> {
+    pub fn encode_into<W: Write>(&self, data: &NetworkData, writer: &mut W) -> IOResult<()> {
         let data: Vec<u8> = data.encode();
         let size = data.len();
         writer.write_all(&size.to_le_bytes()[..])?;
@@ -456,7 +470,7 @@ impl<W: Write> EvesDroppingHook<W> {
 }
 
 impl<S: Write + Send> NetworkHook for EvesDroppingHook<S> {
-    fn update_state(&mut self, data: NetworkData, _: NodeIndex, _: NodeIndex) {
+    fn update_state(&mut self, data: &mut NetworkData, _: NodeIndex, _: NodeIndex) {
         self.encoder.encode_into(data, &mut self.sink).unwrap();
     }
 }
@@ -476,8 +490,8 @@ impl Data {
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Signature {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
-pub(crate) struct PartialMultisignature {
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct PartialMultisignature {
     signed_by: Vec<NodeIndex>,
 }
 
@@ -617,7 +631,9 @@ pub(crate) fn configure_network(
     (router, networks)
 }
 
-pub(crate) fn spawn_honest_member<N: 'static + NetworkT<Hasher64, Data, Signature>>(
+pub(crate) fn spawn_honest_member<
+    N: 'static + NetworkT<Hasher64, Data, Signature, PartialMultisignature>,
+>(
     spawner: Spawner,
     ix: usize,
     n_members: usize,
