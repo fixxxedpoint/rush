@@ -78,6 +78,6 @@ impl<'a> Arbitrary<'a> for VecOfStoredNetworkData {
 
 fuzz_target!(|data: VecOfStoredNetworkData| {
     use tokio::runtime::Runtime;
-    let remapped = data.0.into_iter().map(|v| v.0);
+    let remapped = data.0.into_iter().map(|v| v.0).collect();
     Runtime::new().unwrap().block_on(fuzz(remapped, 4, 30));
 });
