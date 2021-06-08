@@ -58,7 +58,7 @@ impl<'a> Arbitrary<'a> for StoredNetworkData {
 }
 
 #[derive(Debug)]
-struct VecOfStoredNetworkData(Vec<StoredNetworkData>);
+pub(crate) struct VecOfStoredNetworkData(Vec<StoredNetworkData>);
 
 impl<'a> Arbitrary<'a> for VecOfStoredNetworkData {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
