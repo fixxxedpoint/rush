@@ -1,9 +1,9 @@
 #[macro_use]
 extern crate afl;
 
+use aleph_bft::testing::fuzz::fuzz;
+use aleph_bft::testing::mock::{NetworkData, NetworkDataEncoderDecoder};
 use log::error;
-use rush::testing::fuzz::fuzz;
-use rush::testing::mock::{NetworkData, NetworkDataEncoderDecoder};
 use std::io::{BufReader, Read};
 use tokio::runtime::Runtime;
 
@@ -33,7 +33,7 @@ impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
         }
         match self.decoder.decode_from(&mut self.read) {
             Ok(v) => {
-                panic!("wot");
+                // panic!("wot");
                 Some(v)
             }
             // otherwise try to read until you reach the END-OF-FILE

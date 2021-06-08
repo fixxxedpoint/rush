@@ -70,21 +70,20 @@ async fn request_missing_coord() {
     let censoring_node = 1.into();
     let censoring_round = 5;
 
-    let mut hooks: Vec<Box<dyn NetworkHook>> = vec![];
-    hooks.push(Box::new(CorruptPacket {
+    let (mut net_hub, mut networks) = configure_network(n_members, 1.0);
+    net_hub.add_hook(CorruptPacket {
         recipient: censored_node,
         sender: censoring_node,
         creator: censoring_node,
         round: censoring_round,
-    }));
+    });
     let requested = Arc::new(Mutex::new(false));
-    hooks.push(Box::new(NoteRequest {
+    net_hub.add_hook(NoteRequest {
         sender: censored_node,
         creator: censoring_node,
         round: censoring_round,
         requested: requested.clone(),
-    }));
-    let (mut net_hub, mut networks) = configure_network(n_members, 1.0, hooks.into_iter());
+    });
     let spawner = Spawner::new();
     spawner.spawn("network-hub", async move { net_hub.run().await });
 
