@@ -35,13 +35,13 @@ async fn load_fuzz_corpus() {
         .join("corpus")
         .join("fuzz_target_1")
         .join("seed");
-    load_fuzz(fuzz_input.as_ref(), 4).await
+    load_fuzz(fuzz_input.as_ref(), 4, 30).await
 }
 
-async fn load_fuzz(path: &Path, n_members: usize) {
+async fn load_fuzz(path: &Path, n_members: usize, n_batches: usize) {
     let reader = BufReader::new(File::open(path).expect("unable to open a corpus file"));
     let data_iter = NetworkDataIterator::new(reader).collect();
-    fuzz(data_iter, n_members, 30).await;
+    fuzz(data_iter, n_members, n_batches).await;
 }
 
 pub(crate) async fn generate_fuzz(path: &Path, n_members: usize, n_batches: usize) {
