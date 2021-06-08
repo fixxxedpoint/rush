@@ -7,7 +7,7 @@ use crate::{
 };
 use codec::{Decode, Encode};
 use futures::{channel::oneshot, FutureExt, StreamExt};
-use log::{error, info};
+use log::error;
 use std::fmt::Debug;
 
 /// Network represents an interface for sending and receiving NetworkData.

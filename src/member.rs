@@ -3,7 +3,7 @@ use futures::{
     channel::{mpsc, oneshot},
     FutureExt, StreamExt,
 };
-use log::{debug, error, info};
+use log::{debug, error};
 use rand::Rng;
 
 use crate::{
@@ -676,8 +676,7 @@ where
                 sh,
                 exit_stream,
             )
-            .await;
-            // panic!("wot1");
+            .await
         });
         self.tx_consensus = Some(tx_consensus);
         let (alert_messages_for_alerter, alert_messages_from_network) = mpsc::unbounded();
@@ -766,11 +765,8 @@ where
         }
         debug!(target: "AlephBFT-member", "{:?} Ending run.", self.index());
 
-        // let _ = consensus_exit.send(()).unwrap();
-        // let _ = network_exit.send(()).unwrap();
         let _ = consensus_exit.send(());
         let _ = alerter_exit.send(());
         let _ = network_exit.send(());
-        // panic!("wot2");
     }
 }
