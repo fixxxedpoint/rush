@@ -45,14 +45,8 @@ impl<'a> Arbitrary<'a> for StoredNetworkData {
         let mut all_data = IteratorToRead::new(all_data);
         let data = decoder.decode_from(&mut all_data);
         match data {
-            Ok(v) => {
-                // panic!("1");
-                Ok(StoredNetworkData(v))
-            }
-            Err(_) => {
-                // panic!("2");
-                Err(Error::IncorrectFormat)
-            }
+            Ok(v) => Ok(StoredNetworkData(v)),
+            Err(_) => Err(Error::IncorrectFormat),
         }
     }
 }
