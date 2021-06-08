@@ -251,21 +251,25 @@ struct Peer {
     rx: NetworkReceiver,
 }
 
-pub(crate) struct UnreliableRouter<Hook> {
+pub(crate) struct UnreliableRouter {
     peers: HashMap<NodeIndex, Peer>,
     peer_list: Vec<NodeIndex>,
-    hook: Hook,
+    hook_list: Vec<Box<dyn NetworkHook>>,
     reliability: f64, //a number in the range [0, 1], 1.0 means perfect reliability, 0.0 means no message gets through
 }
 
-impl<Hook: NetworkHook> UnreliableRouter<Hook> {
-    pub(crate) fn new(peer_list: Vec<NodeIndex>, reliability: f64, hook: Hook) -> Self {
+impl UnreliableRouter {
+    pub(crate) fn new(peer_list: Vec<NodeIndex>, reliability: f64) -> Self {
         UnreliableRouter {
             peers: HashMap::new(),
             peer_list,
-            hook,
+            hook_list: vec![],
             reliability,
         }
+    }
+
+    pub(crate) fn add_hook<HK: NetworkHook + 'static>(&mut self, hook: HK) {
+        self.hook_list.push(Box::new(hook));
     }
 
     pub(crate) fn connect_peer(&mut self, peer: NodeIndex) -> Network {
@@ -318,7 +322,9 @@ impl<Hook: NetworkHook> UnreliableRouter<Hook> {
                     continue;
                 }
                 if let Some(peer) = self.peers.get_mut(&recipient) {
-                    self.hook.update_state(&mut data, sender, recipient);
+                    for hook in self.hook_list.iter_mut() {
+                        hook.update_state(&mut data, sender, recipient);
+                    }
                     peer.tx
                         .unbounded_send((data, sender))
                         .expect("channel should be open");
@@ -344,18 +350,6 @@ async fn yield_now() {
 
 pub(crate) trait NetworkHook: Send {
     fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex);
-}
-
-pub(crate) struct NoOpHook(());
-
-impl NoOpHook {
-    pub(crate) fn new() -> NoOpHook {
-        NoOpHook(())
-    }
-}
-
-impl NetworkHook for NoOpHook {
-    fn update_state(&mut self, _: &mut NetworkData, _: NodeIndex, _: NodeIndex) {}
 }
 
 #[derive(Clone)]
@@ -618,11 +612,10 @@ pub(crate) type HonestMember<'a> = Member<'a, Hasher64, Data, DataIO, KeyBox, Sp
 pub(crate) fn configure_network(
     n_members: usize,
     reliability: f64,
-    hook: impl NetworkHook,
-) -> (UnreliableRouter<impl NetworkHook>, Vec<Option<Network>>) {
+) -> (UnreliableRouter, Vec<Option<Network>>) {
     let peer_list = (0..n_members).map(NodeIndex).collect();
 
-    let mut router = UnreliableRouter::new(peer_list, reliability, hook);
+    let mut router = UnreliableRouter::new(peer_list, reliability);
     let mut networks = Vec::new();
     for ix in 0..n_members {
         let network = router.connect_peer(NodeIndex(ix));

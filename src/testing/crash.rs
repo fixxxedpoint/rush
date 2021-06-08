@@ -1,7 +1,7 @@
 use futures::StreamExt;
 
 use crate::{
-    testing::mock::{configure_network, init_log, spawn_honest_member, NoOpHook, Spawner},
+    testing::mock::{configure_network, init_log, spawn_honest_member, Spawner},
     SpawnHandle,
 };
 
@@ -15,8 +15,7 @@ async fn honest_members_agree_on_batches(
     let spawner = Spawner::new();
     let mut exits = vec![];
     let mut batch_rxs = Vec::new();
-    let (mut net_hub, mut networks) =
-        configure_network(n_members, network_reliability, NoOpHook::new());
+    let (mut net_hub, mut networks) = configure_network(n_members, network_reliability);
     spawner.spawn("network-hub", async move { net_hub.run().await });
 
     for (ix, network) in networks.iter_mut().enumerate() {

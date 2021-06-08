@@ -1,10 +1,10 @@
 #![no_main]
+use aleph_bft::testing::fuzz::fuzz::fuzz;
+use aleph_bft::testing::mock::{NetworkData, NetworkDataEncoderDecoder};
 use codec::{Decode, Encode};
 use libfuzzer_sys::arbitrary::{Arbitrary, Error, Result, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use log::error;
-use rush::testing::fuzz::fuzz::fuzz;
-use rush::testing::mock::{NetworkData, NetworkDataEncoderDecoder};
 use std::fmt;
 use std::io::{Read, Result as IOResult};
 

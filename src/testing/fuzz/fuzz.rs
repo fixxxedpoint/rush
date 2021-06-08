@@ -31,8 +31,11 @@ async fn generate_fuzz_corpus() {
 #[tokio::test]
 #[ignore]
 async fn load_fuzz_corpus() {
-    let fuzz_input = Path::new("fuzz.corpus");
-    load_fuzz(fuzz_input, 4).await
+    let fuzz_input = Path::new("fuzz")
+        .join("corpus")
+        .join("fuzz_target_1")
+        .join("seed");
+    load_fuzz(fuzz_input.as_ref(), 4).await
 }
 
 async fn load_fuzz(path: &Path, n_members: usize) {
@@ -47,8 +50,9 @@ pub(crate) async fn generate_fuzz(path: &Path, n_members: usize, n_batches: usiz
     let file = BufWriter::new(File::create(path).expect("ubable to create a corpus file"));
     let peer_id = NodeIndex(0);
     let network_hook = EvesDroppingHook::new(file);
+    let (mut router, mut networks) = configure_network(n_members, 1.0);
     let filtering_hook = new_for_peer_id(network_hook, peer_id);
-    let (mut router, mut networks) = configure_network(n_members, 1.0, filtering_hook);
+    router.add_hook(filtering_hook);
 
     spawner.spawn("network", async move { router.run().await });
 

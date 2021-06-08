@@ -773,9 +773,4 @@ where
         let _ = network_exit.send(());
         // panic!("wot2");
     }
-
-    fn exit(&self) {
-        info!(target: "rush-member", "{:?} Closed by external request.", self.index());
-        panic!("early exit");
-    }
 }
