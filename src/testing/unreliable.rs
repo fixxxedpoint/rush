@@ -62,7 +62,8 @@ async fn request_missing_coord() {
     let censoring_node = 1.into();
     let censoring_round = 5;
 
-    let (mut net_hub, mut networks) = configure_network(n_members, 1.0);
+    let (mut net_hub, mut networks) =
+        configure_network(n_members, 1.0, (0..n_members).map(NodeIndex));
     net_hub.add_hook(CorruptPacket {
         recipient: censored_node,
         sender: censoring_node,

@@ -10,8 +10,10 @@ mod crash;
 mod dag;
 #[cfg(any(feature = "fuzz", test))]
 pub mod fuzz;
-#[cfg(any(feature = "fuzz", test))]
+#[cfg(test)]
 pub(crate) mod mock;
+#[cfg(feature = "fuzz")]
+pub mod mock;
 #[cfg(test)]
 mod rmc;
 #[cfg(test)]

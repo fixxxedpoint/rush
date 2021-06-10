@@ -6,9 +6,12 @@ use std::{
 };
 
 use codec::{Decode, Encode, IoReader};
-use futures::{channel::oneshot, StreamExt};
+use futures::{
+    channel::oneshot::{self, Receiver},
+    StreamExt,
+};
 use futures_timer::Delay;
-use log::info;
+use log::{error, info};
 use tokio::runtime::Runtime;
 
 use crate::{
@@ -115,9 +118,12 @@ impl<R: Read> Iterator for NetworkDataIterator<R> {
     fn next(&mut self) -> Option<Self::Item> {
         match self.encoding.decode_from(&mut self.input) {
             Ok(v) => {
+                println!("decoded");
                 return Some(v);
             }
-            Err(_) => {
+            Err(e) => {
+                error!("{:?}", e);
+                println!("{:?}", e);
                 return None;
             }
         }
@@ -128,14 +134,16 @@ struct RecorderNetwork<I: Iterator<Item = NetworkData>> {
     data: I,
     delay: Duration,
     next_delay: Delay,
+    exit: Receiver<()>,
 }
 
 impl<I: Iterator<Item = NetworkData> + Send> RecorderNetwork<I> {
-    fn new(data: I, delay_millis: u64) -> Self {
+    fn new(data: I, delay_millis: u64, exit: Receiver<()>) -> Self {
         RecorderNetwork {
             data,
             delay: Duration::from_millis(delay_millis),
             next_delay: Delay::new(Duration::from_millis(0)),
+            exit,
         }
     }
 }
@@ -164,7 +172,13 @@ impl<I: Iterator<Item = NetworkData> + Send>
     async fn next_event(&mut self) -> Option<ND<Hasher64, Data, Signature, PartialMultisignature>> {
         (&mut self.next_delay).await;
         self.next_delay.reset(self.delay);
-        self.data.next()
+        match self.data.next() {
+            Some(v) => Some(v),
+            None => {
+                let _ = (&mut self.exit).await;
+                None
+            }
+        }
     }
 }
 
@@ -183,11 +197,15 @@ async fn generate_fuzz_async<W: Write + Send + 'static>(
     let file = BufWriter::new(output);
     let peer_id = NodeIndex(0);
     let network_hook = EvesdroppingHook::new(file);
-    let (mut router, mut networks) = configure_network(n_members, 1.0);
+    // spawn only byzantine threshold of nodes and networks so all needs to communicate to finish each round
+    let threshold = (n_members * 2) / 3 + 1;
+    let (mut router, mut networks) =
+        configure_network(n_members, 1.0, (0..threshold).map(NodeIndex));
     let filtering_hook = new_for_peer_id(network_hook, peer_id);
     router.add_hook(filtering_hook);
 
     spawner.spawn("network", async move { router.run().await });
+    // spawner.spawn("network", router);
 
     let mut batch_rxs = Vec::new();
     let mut exits = Vec::new();
@@ -234,21 +252,22 @@ async fn execute_fuzz<I: Iterator<Item = NetworkData> + Send + 'static>(
     n_members: usize,
     n_batches: usize,
 ) {
-    const NETWORK_DELAY: u64 = 200;
+    const NETWORK_DELAY: u64 = 50;
     let spawner = Spawner::new();
     let (empty_tx, empty_rx) = oneshot::channel();
     let data = after_iter(data, move || {
         empty_tx.send(()).expect("empty_rx was already closed");
     });
 
-    let network = RecorderNetwork::new(data, NETWORK_DELAY);
+    let (net_exit, net_exit_rx) = oneshot::channel();
+    let network = RecorderNetwork::new(data, NETWORK_DELAY, net_exit_rx);
 
     let (mut batch_rx, exit_tx) = spawn_honest_member(spawner.clone(), 0, n_members, network);
 
     empty_rx.await.expect("empty_tx was unexpectedly dropped");
 
     let mut batches_count = 0;
-    loop {
+    while batches_count < n_batches {
         match batch_rx.next().await {
             Some(_) => {
                 batches_count += 1;
@@ -265,7 +284,11 @@ async fn execute_fuzz<I: Iterator<Item = NetworkData> + Send + 'static>(
 
     exit_tx
         .send(())
-        .unwrap_or(info!("exit_rx is already closed"));
+        .unwrap_or(info!("exit_rx channel is already closed"));
+
+    net_exit
+        .send(())
+        .unwrap_or(info!("net_exit channel is already closed"));
 
     spawner.wait().await;
 }
@@ -291,7 +314,7 @@ pub fn check_fuzz() {
     let fuzz_output = Path::new("fuzz.corpus");
 
     Runtime::new().unwrap().block_on(async move {
-        generate_fuzz_corpus(fuzz_output).await;
+        // generate_fuzz_corpus(fuzz_output).await;
         load_fuzz_corpus(fuzz_output).await;
     });
 }

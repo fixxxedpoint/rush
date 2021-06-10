@@ -515,13 +515,14 @@ pub(crate) type HonestMember<'a> = Member<'a, Hasher64, Data, DataIO, KeyBox, Sp
 pub(crate) fn configure_network(
     n_members: usize,
     reliability: f64,
+    connected: impl IntoIterator<Item = NodeIndex>,
 ) -> (UnreliableRouter, Vec<Option<Network>>) {
     let peer_list = (0..n_members).map(NodeIndex).collect();
 
     let mut router = UnreliableRouter::new(peer_list, reliability);
     let mut networks = Vec::new();
-    for ix in 0..n_members {
-        let network = router.connect_peer(NodeIndex(ix));
+    for ix in connected {
+        let network = router.connect_peer(ix);
         networks.push(Some(network));
     }
     (router, networks)
