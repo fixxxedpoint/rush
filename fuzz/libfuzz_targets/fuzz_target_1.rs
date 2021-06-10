@@ -1,6 +1,5 @@
 #![no_main]
-use aleph_bft::testing::fuzz::fuzz::fuzz;
-use aleph_bft::testing::mock::{NetworkData, NetworkDataEncoderDecoder};
+use aleph_bft::testing::fuzz::{fuzz, NetworkData, NetworkDataEncoding};
 use codec::{Decode, Encode};
 use libfuzzer_sys::arbitrary::{Arbitrary, Error, Result, Unstructured};
 use libfuzzer_sys::fuzz_target;
@@ -39,7 +38,7 @@ where
 
 impl<'a> Arbitrary<'a> for StoredNetworkData {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
-        let decoder = NetworkDataEncoderDecoder::new();
+        let decoder = NetworkDataEncoding::new();
         let all_data = u.arbitrary_iter().expect("no data available");
         let all_data = all_data.take_while(|u| u.is_ok()).map(|u| u.unwrap());
         let mut all_data = IteratorToRead::new(all_data);
@@ -52,7 +51,7 @@ impl<'a> Arbitrary<'a> for StoredNetworkData {
 }
 
 #[derive(Debug)]
-pub(crate) struct VecOfStoredNetworkData(Vec<StoredNetworkData>);
+struct VecOfStoredNetworkData(Vec<StoredNetworkData>);
 
 impl<'a> Arbitrary<'a> for VecOfStoredNetworkData {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
@@ -71,7 +70,6 @@ impl<'a> Arbitrary<'a> for VecOfStoredNetworkData {
 }
 
 fuzz_target!(|data: VecOfStoredNetworkData| {
-    use tokio::runtime::Runtime;
     let remapped = data.0.into_iter().map(|v| v.0).collect();
-    Runtime::new().unwrap().block_on(fuzz(remapped, 4, 30));
+    fuzz(remapped, 4, 30)
 });
