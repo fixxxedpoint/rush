@@ -53,14 +53,6 @@ impl NetworkHook for NoteRequest {
     }
 }
 
-impl<I: Iterator<Item = Box<dyn NetworkHook>> + Send> NetworkHook for I {
-    fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex) {
-        for mut hook in self {
-            hook.update_state(data, sender, recipient);
-        }
-    }
-}
-
 #[tokio::test]
 async fn request_missing_coord() {
     init_log();

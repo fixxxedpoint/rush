@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use codec::{Compact, Decode, Encode, IoReader};
+use codec::{Decode, Encode, IoReader};
 use futures::{channel::oneshot, StreamExt};
 use futures_timer::Delay;
 use log::info;
@@ -114,8 +114,12 @@ impl<R: Read> Iterator for NetworkDataIterator<R> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.encoding.decode_from(&mut self.input) {
-            Ok(v) => Some(v),
-            Err(_) => None,
+            Ok(v) => {
+                return Some(v);
+            }
+            Err(_) => {
+                return None;
+            }
         }
     }
 }
@@ -164,25 +168,10 @@ impl<I: Iterator<Item = NetworkData> + Send>
     }
 }
 
-fn test_encode_decode() {
-    let test: Vec<u8> = vec![1, 2, 3, 4, 5];
-    let mut encoded = test.encode();
-    // let fake_size: u32 = u32::max_value() / 8;
-    let fake_size = Compact::<u32>(u32::max_value());
-    let fake_size = fake_size.encode();
-    for (ix, v) in fake_size.iter().enumerate() {
-        encoded[ix] = *v;
-    }
-    let mut reader = IoReader(&encoded[..]);
-    let result = <Vec<u8>>::decode(&mut reader);
-    println!("result: {:?}", result);
-    panic!("abc");
-}
-
 async fn load_fuzz(path: &Path, n_members: usize, n_batches: usize) {
     let reader = BufReader::new(File::open(path).expect("unable to open a corpus file"));
-    let data_iter = NetworkDataIterator::new(reader).collect();
-    fuzz_async(data_iter, n_members, n_batches).await;
+    let data_iter = NetworkDataIterator::new(reader);
+    execute_fuzz(data_iter, n_members, n_batches).await;
 }
 
 async fn generate_fuzz_async<W: Write + Send + 'static>(
@@ -230,17 +219,25 @@ pub fn generate_fuzz<W: Write + Send + 'static>(output: W, n_members: usize, n_b
         .block_on(generate_fuzz_async(output, n_members, n_batches));
 }
 
-pub fn fuzz(data: Vec<NetworkData>, n_members: usize, n_batches: usize) {
+pub fn fuzz<I: Iterator<Item = NetworkData> + Send + 'static>(
+    data: I,
+    n_members: usize,
+    n_batches: usize,
+) {
     Runtime::new()
         .unwrap()
-        .block_on(fuzz_async(data, n_members, n_batches));
+        .block_on(execute_fuzz(data, n_members, n_batches));
 }
 
-async fn fuzz_async(data: Vec<NetworkData>, n_members: usize, n_batches: usize) {
+async fn execute_fuzz<I: Iterator<Item = NetworkData> + Send + 'static>(
+    data: I,
+    n_members: usize,
+    n_batches: usize,
+) {
     const NETWORK_DELAY: u64 = 200;
     let spawner = Spawner::new();
     let (empty_tx, empty_rx) = oneshot::channel();
-    let data = after_iter(data.into_iter(), move || {
+    let data = after_iter(data, move || {
         empty_tx.send(()).expect("empty_rx was already closed");
     });
 
@@ -259,9 +256,12 @@ async fn fuzz_async(data: Vec<NetworkData>, n_members: usize, n_batches: usize) 
             None => break,
         }
     }
-    if n_batches != batches_count {
-        info!(target: "rush", "Expected {:?} batches, received {:?}", n_batches, batches_count);
-    }
+    assert!(
+        batches_count >= n_batches,
+        "Expected at least {:?} batches, but received {:?}.",
+        n_batches,
+        batches_count
+    );
 
     exit_tx
         .send(())
@@ -270,21 +270,28 @@ async fn fuzz_async(data: Vec<NetworkData>, n_members: usize, n_batches: usize) 
     spawner.wait().await;
 }
 
-#[tokio::test]
-#[ignore]
-async fn generate_fuzz_corpus() {
-    // test_encode_decode();
-    let fuzz_output = Path::new("fuzz.corpus");
+async fn generate_fuzz_corpus(fuzz_output: &Path) {
     let output = File::create(fuzz_output).expect("ubable to create a corpus file");
     generate_fuzz_async(output, 4, 30).await
 }
 
+async fn load_fuzz_corpus(fuzz_input: &Path) {
+    load_fuzz(fuzz_input.as_ref(), 4, 30).await
+}
+
 #[tokio::test]
 #[ignore]
-async fn load_fuzz_corpus() {
-    let fuzz_input = Path::new("fuzz")
-        .join("corpus")
-        .join("fuzz_target_1")
-        .join("seed");
-    load_fuzz(fuzz_input.as_ref(), 4, 30).await
+async fn fuzz_loop() {
+    let fuzz_output = Path::new("fuzz.corpus");
+    generate_fuzz_corpus(fuzz_output).await;
+    load_fuzz_corpus(fuzz_output).await;
+}
+
+pub fn check_fuzz() {
+    let fuzz_output = Path::new("fuzz.corpus");
+
+    Runtime::new().unwrap().block_on(async move {
+        generate_fuzz_corpus(fuzz_output).await;
+        load_fuzz_corpus(fuzz_output).await;
+    });
 }

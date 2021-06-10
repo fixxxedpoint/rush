@@ -26,6 +26,7 @@ pub use signed::*;
 mod config;
 pub mod rmc;
 mod terminal;
+#[cfg(any(feature = "fuzz", test))]
 pub mod testing;
 mod units;
 

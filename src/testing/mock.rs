@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use codec::{Decode, Encode, Error, IoReader};
+use codec::{Decode, Encode};
 use log::{debug, error};
 use parking_lot::Mutex;
 
@@ -10,11 +10,8 @@ use futures::{
         mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
         oneshot,
     },
-    future::poll_fn,
     Future, StreamExt,
 };
-use log::{debug, error};
-use parking_lot::Mutex;
 
 use std::{
     cell::Cell,
@@ -226,7 +223,7 @@ pub(crate) struct Network {
 impl NetworkT<Hasher64, Data, Signature, PartialMultisignature> for Network {
     type Error = ();
 
-    fn broadcast(&self, data: NetworkData) -> core::result::Result<(), Self::Error> {
+    fn broadcast(&self, data: NetworkData) -> Result<(), Self::Error> {
         for peer in self.peers.iter() {
             if *peer != self.index {
                 self.send(data.clone(), *peer)?;
@@ -235,7 +232,7 @@ impl NetworkT<Hasher64, Data, Signature, PartialMultisignature> for Network {
         Ok(())
     }
 
-    fn send(&self, data: NetworkData, node: NodeIndex) -> core::result::Result<(), Self::Error> {
+    fn send(&self, data: NetworkData, node: NodeIndex) -> Result<(), Self::Error> {
         self.tx.unbounded_send((data, node)).map_err(|_| ())
     }
 
@@ -331,19 +328,6 @@ impl UnreliableRouter {
             yield_now().await;
         }
     }
-}
-
-async fn yield_now() {
-    let mut yielded = false;
-    poll_fn(move |cx: &mut Context<'_>| -> Poll<()> {
-        if yielded {
-            return Poll::Ready(());
-        }
-        yielded = true;
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    })
-    .await
 }
 
 pub(crate) trait NetworkHook: Send {
@@ -543,13 +527,11 @@ pub(crate) fn configure_network(
     (router, networks)
 }
 
-pub(crate) fn spawn_honest_member<
-    N: 'static + NetworkT<Hasher64, Data, Signature, PartialMultisignature>,
->(
+pub(crate) fn spawn_honest_member(
     spawner: Spawner,
     ix: usize,
     n_members: usize,
-    network: N,
+    network: impl 'static + NetworkT<Hasher64, Data, Signature, PartialMultisignature>,
 ) -> (UnboundedReceiver<OrderedBatch<Data>>, oneshot::Sender<()>) {
     let node_index = NodeIndex(ix);
     let (data_io, rx_batch) = DataIO::new(node_index);

@@ -231,8 +231,8 @@ async fn honest_members_agree_on_batches_byzantine(
         } else {
             let (batch_rx, exit_tx) =
                 spawn_honest_member(spawner.clone(), ix, n_members, network.take().unwrap());
-            exits.push(exit_tx);
             batch_rxs.push(batch_rx);
+            exits.push(exit_tx);
         }
     }
 
