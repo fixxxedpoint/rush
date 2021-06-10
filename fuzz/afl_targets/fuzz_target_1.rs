@@ -1,28 +1,26 @@
 #[macro_use]
 extern crate afl;
 
-use aleph_bft::testing::fuzz::fuzz;
-use aleph_bft::testing::mock::{init_log, NetworkData, NetworkDataEncoderDecoder};
+use aleph_bft::testing::fuzz;
 use log::error;
 use std::io::{BufReader, Read};
-use tokio::runtime::Runtime;
 
 struct ReadToNetworkDataIterator<R> {
     read: BufReader<R>,
-    decoder: NetworkDataEncoderDecoder,
+    decoder: fuzz::NetworkDataEncoding,
 }
 
 impl<R: Read> ReadToNetworkDataIterator<R> {
     fn new(read: R) -> Self {
         ReadToNetworkDataIterator {
             read: BufReader::new(read),
-            decoder: NetworkDataEncoderDecoder::new(),
+            decoder: fuzz::NetworkDataEncoding::new(),
         }
     }
 }
 
 impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
-    type Item = NetworkData;
+    type Item = fuzz::NetworkData;
 
     fn next(&mut self) -> Option<Self::Item> {
         use std::io::BufRead;
@@ -43,9 +41,8 @@ impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
 }
 
 fn main() {
-    init_log();
     fuzz!(|data: &[u8]| {
         let data = ReadToNetworkDataIterator::new(data).collect();
-        Runtime::new().unwrap().block_on(fuzz::fuzz(data, 4, 30));
+        fuzz::fuzz(data, 4, 30)
     });
 }

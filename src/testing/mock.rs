@@ -20,8 +20,6 @@ use std::{
     cell::Cell,
     collections::{hash_map::DefaultHasher, HashMap},
     hash::Hasher as StdHasher,
-    io::{Read, Result as IOResult, Write},
-    mem,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -390,85 +388,6 @@ impl NetworkHook for AlertHook {
     }
 }
 
-pub(crate) struct FilteringHook<IH, F> {
-    wrapped: IH,
-    filter: F,
-}
-
-impl<IH, F: FnMut(&NetworkData, &NodeIndex, &NodeIndex) -> bool + Send> FilteringHook<IH, F> {
-    pub(crate) fn new(wrapped: IH, filter: F) -> Self {
-        FilteringHook { wrapped, filter }
-    }
-}
-
-pub(crate) fn new_for_peer_id<IH>(
-    wrapped: IH,
-    peer_id: NodeIndex,
-) -> FilteringHook<IH, impl FnMut(&NetworkData, &NodeIndex, &NodeIndex) -> bool + Send> {
-    FilteringHook::new(wrapped, move |_, _, receiver| *receiver == peer_id)
-}
-
-impl<IH: NetworkHook, F: FnMut(&NetworkData, &NodeIndex, &NodeIndex) -> bool + Send> NetworkHook
-    for FilteringHook<IH, F>
-{
-    fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex) {
-        if (self.filter)(&data, &sender, &recipient) {
-            self.wrapped.update_state(data, sender, recipient);
-        }
-    }
-}
-
-pub(crate) struct EvesDroppingHook<S>
-where
-    S: Write,
-{
-    sink: S,
-    encoder: NetworkDataEncoderDecoder,
-}
-
-pub struct NetworkDataEncoderDecoder {}
-
-impl NetworkDataEncoderDecoder {
-    pub fn new() -> Self {
-        NetworkDataEncoderDecoder {}
-    }
-
-    pub fn encode_into<W: Write>(&self, data: &NetworkData, writer: &mut W) -> IOResult<()> {
-        let data: Vec<u8> = data.encode();
-        let size = data.len();
-        writer.write_all(&size.to_le_bytes()[..])?;
-        writer.write_all(&data[..])
-    }
-
-    pub fn decode_from<R: Read>(
-        &self,
-        reader: &mut R,
-    ) -> core::result::Result<NetworkData, codec::Error> {
-        let mut size_bytes = [0u8; mem::size_of::<usize>()];
-        reader.read_exact(&mut size_bytes[..])?;
-        let size = usize::from_le_bytes(size_bytes);
-        let mut net_data = vec![0; size];
-        reader.read_exact(&mut net_data[..])?;
-        let mut reader = IoReader(&net_data[..]);
-        <NetworkData>::decode(&mut reader)
-    }
-}
-
-impl<W: Write> EvesDroppingHook<W> {
-    pub(crate) fn new(writer: W) -> EvesDroppingHook<W> {
-        EvesDroppingHook {
-            sink: writer,
-            encoder: NetworkDataEncoderDecoder {},
-        }
-    }
-}
-
-impl<S: Write + Send> NetworkHook for EvesDroppingHook<S> {
-    fn update_state(&mut self, data: &mut NetworkData, _: NodeIndex, _: NodeIndex) {
-        self.encoder.encode_into(data, &mut self.sink).unwrap();
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Hash)]
 pub struct Data {
     coord: UnitCoord,
@@ -640,7 +559,7 @@ pub(crate) fn spawn_honest_member<
     let member_task = async move {
         let keybox = KeyBox::new(NodeCount(n_members), node_index);
         let member = HonestMember::new(data_io, &keybox, config, spawner_inner.clone());
-        member.run_session(network, exit_rx).await;
+        member.run_session(network, exit_rx).await
     };
     spawner.spawn("member", member_task);
     (rx_batch, exit_tx)

@@ -23,6 +23,7 @@ log = "0.4"
 rand = "0.8"
 async-trait = "0.1"
 codec = { package = "parity-scale-codec", version = "2", default-features = false, features = ["derive", "std"] }
+
 tokio = { version = "1.6.1", features = ["macros", "rt", "rt-multi-thread"], optional = true }
 libp2p = { version = "0.38", features = ["mdns", "tcp-tokio"], optional = true }
 parking_lot = { version =  "0.11", optional = true }
