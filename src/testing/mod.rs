@@ -8,12 +8,10 @@ mod consensus;
 mod crash;
 #[cfg(test)]
 mod dag;
-#[cfg(any(feature = "fuzz", test))]
+#[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz;
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz"))]
 pub(crate) mod mock;
-#[cfg(feature = "fuzz")]
-pub mod mock;
 #[cfg(test)]
 mod rmc;
 #[cfg(test)]

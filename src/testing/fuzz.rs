@@ -118,12 +118,10 @@ impl<R: Read> Iterator for NetworkDataIterator<R> {
     fn next(&mut self) -> Option<Self::Item> {
         match self.encoding.decode_from(&mut self.input) {
             Ok(v) => {
-                println!("decoded");
                 return Some(v);
             }
             Err(e) => {
-                error!("{:?}", e);
-                println!("{:?}", e);
+                error!("Error while decoding NetworkData: {:?}.", e);
                 return None;
             }
         }
@@ -197,7 +195,7 @@ async fn generate_fuzz_async<W: Write + Send + 'static>(
     let file = BufWriter::new(output);
     let peer_id = NodeIndex(0);
     let network_hook = EvesdroppingHook::new(file);
-    // spawn only byzantine threshold of nodes and networks so all needs to communicate to finish each round
+    // spawn only byzantine-threshold of nodes and networks so all nodes are essential to finish each round
     let threshold = (n_members * 2) / 3 + 1;
     let (mut router, mut networks) =
         configure_network(n_members, 1.0, (0..threshold).map(NodeIndex));
@@ -205,7 +203,6 @@ async fn generate_fuzz_async<W: Write + Send + 'static>(
     router.add_hook(filtering_hook);
 
     spawner.spawn("network", async move { router.run().await });
-    // spawner.spawn("network", router);
 
     let mut batch_rxs = Vec::new();
     let mut exits = Vec::new();
@@ -237,14 +234,10 @@ pub fn generate_fuzz<W: Write + Send + 'static>(output: W, n_members: usize, n_b
         .block_on(generate_fuzz_async(output, n_members, n_batches));
 }
 
-pub fn fuzz<I: Iterator<Item = NetworkData> + Send + 'static>(
-    data: I,
-    n_members: usize,
-    n_batches: usize,
-) {
+pub fn fuzz(data: Vec<NetworkData>, n_members: usize, n_batches: usize) {
     Runtime::new()
         .unwrap()
-        .block_on(execute_fuzz(data, n_members, n_batches));
+        .block_on(execute_fuzz(data.into_iter(), n_members, n_batches));
 }
 
 async fn execute_fuzz<I: Iterator<Item = NetworkData> + Send + 'static>(
@@ -252,7 +245,7 @@ async fn execute_fuzz<I: Iterator<Item = NetworkData> + Send + 'static>(
     n_members: usize,
     n_batches: usize,
 ) {
-    const NETWORK_DELAY: u64 = 50;
+    const NETWORK_DELAY: u64 = 32;
     let spawner = Spawner::new();
     let (empty_tx, empty_rx) = oneshot::channel();
     let data = after_iter(data, move || {
@@ -314,7 +307,7 @@ pub fn check_fuzz() {
     let fuzz_output = Path::new("fuzz.corpus");
 
     Runtime::new().unwrap().block_on(async move {
-        // generate_fuzz_corpus(fuzz_output).await;
+        generate_fuzz_corpus(fuzz_output).await;
         load_fuzz_corpus(fuzz_output).await;
     });
 }
