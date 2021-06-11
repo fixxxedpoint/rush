@@ -1,26 +1,28 @@
 #[macro_use]
 extern crate afl;
 
-use aleph_bft::testing::fuzz;
+use aleph_bft::testing::fuzz::{
+    execute_fuzz, fuzz, Builder, NetworkData, NetworkDataEncoding, Runtime,
+};
 use log::error;
 use std::io::{BufReader, Read};
 
 struct ReadToNetworkDataIterator<R> {
     read: BufReader<R>,
-    decoder: fuzz::NetworkDataEncoding,
+    decoder: NetworkDataEncoding,
 }
 
 impl<R: Read> ReadToNetworkDataIterator<R> {
     fn new(read: R) -> Self {
         ReadToNetworkDataIterator {
             read: BufReader::new(read),
-            decoder: fuzz::NetworkDataEncoding::new(),
+            decoder: NetworkDataEncoding::new(),
         }
     }
 }
 
 impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
-    type Item = fuzz::NetworkData;
+    type Item = NetworkData;
 
     fn next(&mut self) -> Option<Self::Item> {
         use std::io::BufRead;
@@ -41,8 +43,12 @@ impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
 }
 
 fn main() {
+    // let builder = Builder::new_current_thread().enable_all();
     fuzz!(|data: &[u8]| {
-        let data = ReadToNetworkDataIterator::new(data).collect();
-        fuzz::fuzz(data, 4, 30)
+        let data: Vec<NetworkData> = ReadToNetworkDataIterator::new(data).collect();
+        // builder.build().unwrap().block_on(execute_fuzz(data, 4, 30));
+        fuzz(data, 4, 30);
+        // Runtime::new().unwrap().block_on(execute_fuzz(data, 4, 30));
+        // runtime.block_on(execute_fuzz(data, 4, 30));
     });
 }

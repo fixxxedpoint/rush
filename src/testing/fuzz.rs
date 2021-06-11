@@ -12,7 +12,7 @@ use futures::{
 };
 use futures_timer::Delay;
 use log::{error, info};
-use tokio::runtime::Runtime;
+pub use tokio::runtime::{Builder, Runtime};
 
 use crate::{
     nodes::NodeIndex,
@@ -182,7 +182,7 @@ impl<I: Iterator<Item = NetworkData> + Send>
 
 async fn load_fuzz(path: &Path, n_members: usize, n_batches: usize) {
     let reader = BufReader::new(File::open(path).expect("unable to open a corpus file"));
-    let data_iter = NetworkDataIterator::new(reader);
+    let data_iter = NetworkDataIterator::new(reader).collect();
     execute_fuzz(data_iter, n_members, n_batches).await;
 }
 
@@ -235,20 +235,26 @@ pub fn generate_fuzz<W: Write + Send + 'static>(output: W, n_members: usize, n_b
 }
 
 pub fn fuzz(data: Vec<NetworkData>, n_members: usize, n_batches: usize) {
-    Runtime::new()
-        .unwrap()
-        .block_on(execute_fuzz(data.into_iter(), n_members, n_batches));
+    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    runtime.block_on(execute_fuzz(data.clone(), n_members, n_batches));
+    runtime.shutdown_background();
+
+    // let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    // runtime.block_on(execute_fuzz(data, n_members, n_batches));
+    // runtime.shutdown_background();
+    // panic!("wot");
+
+    // run(execute_fuzz(data, n_members, n_batches));
+    // Runtime::new()
+    //     .unwrap()
+    //     .block_on(execute_fuzz(data, n_members, n_batches));
 }
 
-async fn execute_fuzz<I: Iterator<Item = NetworkData> + Send + 'static>(
-    data: I,
-    n_members: usize,
-    n_batches: usize,
-) {
+pub async fn execute_fuzz(data: Vec<NetworkData>, n_members: usize, n_batches: usize) {
     const NETWORK_DELAY: u64 = 32;
     let spawner = Spawner::new();
     let (empty_tx, empty_rx) = oneshot::channel();
-    let data = after_iter(data, move || {
+    let data = after_iter(data.into_iter(), move || {
         empty_tx.send(()).expect("empty_rx was already closed");
     });
 
@@ -261,11 +267,10 @@ async fn execute_fuzz<I: Iterator<Item = NetworkData> + Send + 'static>(
 
     let mut batches_count = 0;
     while batches_count < n_batches {
-        match batch_rx.next().await {
-            Some(_) => {
-                batches_count += 1;
-            }
-            None => break,
+        if let Some(_) = batch_rx.next().await {
+            batches_count += 1;
+        } else {
+            break;
         }
     }
     assert!(
@@ -275,13 +280,13 @@ async fn execute_fuzz<I: Iterator<Item = NetworkData> + Send + 'static>(
         batches_count
     );
 
-    exit_tx
-        .send(())
-        .unwrap_or(info!("exit_rx channel is already closed"));
-
     net_exit
         .send(())
         .unwrap_or(info!("net_exit channel is already closed"));
+
+    exit_tx
+        .send(())
+        .unwrap_or(info!("exit_rx channel is already closed"));
 
     spawner.wait().await;
 }
