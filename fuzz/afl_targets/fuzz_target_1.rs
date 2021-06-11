@@ -1,9 +1,7 @@
 #[macro_use]
 extern crate afl;
 
-use aleph_bft::testing::fuzz::{
-    execute_fuzz, fuzz, Builder, NetworkData, NetworkDataEncoding, Runtime,
-};
+use aleph_bft::testing::fuzz::{fuzz, NetworkData, NetworkDataEncoding};
 use log::error;
 use std::io::{BufReader, Read};
 
@@ -43,12 +41,9 @@ impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
 }
 
 fn main() {
-    // let builder = Builder::new_current_thread().enable_all();
     fuzz!(|data: &[u8]| {
         let data: Vec<NetworkData> = ReadToNetworkDataIterator::new(data).collect();
-        // builder.build().unwrap().block_on(execute_fuzz(data, 4, 30));
-        fuzz(data, 4, 30);
-        // Runtime::new().unwrap().block_on(execute_fuzz(data, 4, 30));
-        // runtime.block_on(execute_fuzz(data, 4, 30));
+        let max_number_of_batches = data.len();
+        fuzz(data, 4, max_number_of_batches);
     });
 }

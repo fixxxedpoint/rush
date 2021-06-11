@@ -71,5 +71,6 @@ impl<'a> Arbitrary<'a> for VecOfStoredNetworkData {
 
 fuzz_target!(|data: VecOfStoredNetworkData| {
     let remapped = data.0.into_iter().map(|v| v.0).collect();
-    fuzz(remapped, 4, 30)
+    let max_number_of_batches = data.len();
+    fuzz(remapped, 4, max_number_of_batches);
 });

@@ -1,19 +1,5 @@
-use std::{
-    fs::File,
-    io::{BufReader, BufWriter, Read, Result as IOResult, Write},
-    path::Path,
-    time::Duration,
-};
-
-use codec::{Decode, Encode, IoReader};
-use futures::{
-    channel::oneshot::{self, Receiver},
-    StreamExt,
-};
-use futures_timer::Delay;
-use log::{error, info};
-pub use tokio::runtime::{Builder, Runtime};
-
+pub use crate::testing::mock::NetworkData;
+use crate::testing::mock::{configure_network, Spawner};
 use crate::{
     nodes::NodeIndex,
     testing::mock::{
@@ -22,10 +8,20 @@ use crate::{
     utils::after_iter,
     Network, NetworkData as ND, SpawnHandle,
 };
-
-pub use crate::testing::mock::NetworkData;
-
-use crate::testing::mock::{configure_network, Spawner};
+use codec::{Decode, Encode, IoReader};
+use futures::{
+    channel::oneshot::{self, Receiver},
+    StreamExt,
+};
+use futures_timer::Delay;
+use log::{error, info};
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Read, Result as IOResult, Write},
+    path::Path,
+    time::Duration,
+};
+use tokio::runtime::Builder;
 
 struct FilteringHook<IH, F> {
     wrapped: IH,
@@ -182,7 +178,7 @@ impl<I: Iterator<Item = NetworkData> + Send>
 
 async fn load_fuzz(path: &Path, n_members: usize, n_batches: usize) {
     let reader = BufReader::new(File::open(path).expect("unable to open a corpus file"));
-    let data_iter = NetworkDataIterator::new(reader).collect();
+    let data_iter = NetworkDataIterator::new(reader);
     execute_fuzz(data_iter, n_members, n_batches).await;
 }
 
@@ -229,31 +225,24 @@ async fn generate_fuzz_async<W: Write + Send + 'static>(
 }
 
 pub fn generate_fuzz<W: Write + Send + 'static>(output: W, n_members: usize, n_batches: usize) {
-    Runtime::new()
-        .unwrap()
-        .block_on(generate_fuzz_async(output, n_members, n_batches));
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(generate_fuzz_async(output, n_members, n_batches));
 }
 
 pub fn fuzz(data: Vec<NetworkData>, n_members: usize, n_batches: usize) {
-    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
-    runtime.block_on(execute_fuzz(data.clone(), n_members, n_batches));
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(execute_fuzz(data.into_iter(), n_members, n_batches));
     runtime.shutdown_background();
-
-    // let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
-    // runtime.block_on(execute_fuzz(data, n_members, n_batches));
-    // runtime.shutdown_background();
-    // panic!("wot");
-
-    // run(execute_fuzz(data, n_members, n_batches));
-    // Runtime::new()
-    //     .unwrap()
-    //     .block_on(execute_fuzz(data, n_members, n_batches));
 }
 
-pub async fn execute_fuzz(data: Vec<NetworkData>, n_members: usize, n_batches: usize) {
+pub async fn execute_fuzz(
+    data: impl Iterator<Item = NetworkData> + Send + 'static,
+    n_members: usize,
+    n_batches: usize,
+) {
     const NETWORK_DELAY: u64 = 32;
     let spawner = Spawner::new();
-    let (empty_tx, empty_rx) = oneshot::channel();
+    let (empty_tx, mut empty_rx) = oneshot::channel();
     let data = after_iter(data.into_iter(), move || {
         empty_tx.send(()).expect("empty_rx was already closed");
     });
@@ -263,16 +252,22 @@ pub async fn execute_fuzz(data: Vec<NetworkData>, n_members: usize, n_batches: u
 
     let (mut batch_rx, exit_tx) = spawn_honest_member(spawner.clone(), 0, n_members, network);
 
-    empty_rx.await.expect("empty_tx was unexpectedly dropped");
+    // empty_rx.await.expect("empty_tx was unexpectedly dropped");
 
     let mut batches_count = 0;
     while batches_count < n_batches {
-        if let Some(_) = batch_rx.next().await {
-            batches_count += 1;
-        } else {
-            break;
+        futures::select! {
+            batch = batch_rx.next() => {
+                if let Some(_) = batch {
+                    batches_count += 1;
+                } else {
+                    break;
+                }
+            }
+            _ = empty_rx => break,
         }
     }
+
     assert!(
         batches_count >= n_batches,
         "Expected at least {:?} batches, but received {:?}.",
@@ -311,8 +306,10 @@ async fn fuzz_loop() {
 pub fn check_fuzz() {
     let fuzz_output = Path::new("fuzz.corpus");
 
-    Runtime::new().unwrap().block_on(async move {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async move {
         generate_fuzz_corpus(fuzz_output).await;
         load_fuzz_corpus(fuzz_output).await;
     });
+    // runtime.shutdown_background();
 }
