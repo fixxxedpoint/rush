@@ -1,6 +1,6 @@
 #![no_main]
 use aleph_bft::testing::fuzz::{fuzz, NetworkData, NetworkDataEncoding};
-use codec::{Decode, Encode};
+use codec::Decode;
 use libfuzzer_sys::arbitrary::{Arbitrary, Error, Result, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use log::error;
@@ -70,7 +70,6 @@ impl<'a> Arbitrary<'a> for VecOfStoredNetworkData {
 }
 
 fuzz_target!(|data: VecOfStoredNetworkData| {
-    // let max_number_of_batches = data.0.len();
     let remapped = data.0.into_iter().map(|v| v.0).collect();
     fuzz(remapped, 4, None);
 });
