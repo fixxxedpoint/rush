@@ -7,7 +7,7 @@ use log::error;
 use std::fmt;
 use std::io::{Read, Result as IOResult};
 
-#[derive(Encode, Decode)]
+#[derive(Decode)]
 struct StoredNetworkData(NetworkData);
 
 impl fmt::Debug for StoredNetworkData {
@@ -70,7 +70,7 @@ impl<'a> Arbitrary<'a> for VecOfStoredNetworkData {
 }
 
 fuzz_target!(|data: VecOfStoredNetworkData| {
-    let max_number_of_batches = data.0.len();
+    // let max_number_of_batches = data.0.len();
     let remapped = data.0.into_iter().map(|v| v.0).collect();
-    fuzz(remapped, 4, max_number_of_batches);
+    fuzz(remapped, 4, None);
 });

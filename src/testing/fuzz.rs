@@ -16,61 +16,24 @@ use futures::{
 use futures_timer::Delay;
 use log::{error, info};
 use std::{
-    fs::File,
-    io::{BufReader, BufWriter, Read, Result as IOResult, Write},
-    path::Path,
+    io::{Read, Result as IOResult, Write},
     time::Duration,
 };
 use tokio::runtime::Builder;
 
-struct FilteringHook<IH, F> {
-    wrapped: IH,
-    filter: F,
+struct ClosureHook<CT> {
+    wrapped: CT,
 }
 
-impl<IH, F: FnMut(&NetworkData, &NodeIndex, &NodeIndex) -> bool + Send> FilteringHook<IH, F> {
-    pub(crate) fn new(wrapped: IH, filter: F) -> Self {
-        FilteringHook { wrapped, filter }
+impl<F: FnMut(&NetworkData, NodeIndex, NodeIndex) + Send> ClosureHook<F> {
+    pub(crate) fn new(wrapped: F) -> Self {
+        ClosureHook { wrapped }
     }
 }
 
-fn new_for_peer_id<IH>(
-    wrapped: IH,
-    peer_id: NodeIndex,
-) -> FilteringHook<IH, impl FnMut(&NetworkData, &NodeIndex, &NodeIndex) -> bool + Send> {
-    FilteringHook::new(wrapped, move |_, _, receiver| *receiver == peer_id)
-}
-
-impl<IH: NetworkHook, F: FnMut(&NetworkData, &NodeIndex, &NodeIndex) -> bool + Send> NetworkHook
-    for FilteringHook<IH, F>
-{
+impl<F: FnMut(&NetworkData, NodeIndex, NodeIndex) + Send> NetworkHook for ClosureHook<F> {
     fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex) {
-        if (self.filter)(&data, &sender, &recipient) {
-            self.wrapped.update_state(data, sender, recipient);
-        }
-    }
-}
-
-struct EvesdroppingHook<S>
-where
-    S: Write,
-{
-    sink: S,
-    encoder: NetworkDataEncoding,
-}
-
-impl<W: Write> EvesdroppingHook<W> {
-    pub(crate) fn new(writer: W) -> EvesdroppingHook<W> {
-        EvesdroppingHook {
-            sink: writer,
-            encoder: NetworkDataEncoding::new(),
-        }
-    }
-}
-
-impl<S: Write + Send> NetworkHook for EvesdroppingHook<S> {
-    fn update_state(&mut self, data: &mut NetworkData, _: NodeIndex, _: NodeIndex) {
-        self.encoder.encode_into(data, &mut self.sink).unwrap();
+        (self.wrapped)(data, sender, recipient);
     }
 }
 
@@ -136,7 +99,7 @@ impl<I: Iterator<Item = NetworkData> + Send> RecorderNetwork<I> {
         RecorderNetwork {
             data,
             delay: Duration::from_millis(delay_millis),
-            next_delay: Delay::new(Duration::from_millis(0)),
+            next_delay: Delay::new(Duration::from_millis(delay_millis)),
             exit,
         }
     }
@@ -169,6 +132,7 @@ impl<I: Iterator<Item = NetworkData> + Send>
         match self.data.next() {
             Some(v) => Some(v),
             None => {
+                // just for an exit call when no more data is available
                 let _ = (&mut self.exit).await;
                 None
             }
@@ -176,28 +140,26 @@ impl<I: Iterator<Item = NetworkData> + Send>
     }
 }
 
-async fn load_fuzz(path: &Path, n_members: usize, n_batches: Option<usize>) {
-    let reader = BufReader::new(File::open(path).expect("unable to open a corpus file"));
-    let data_iter = NetworkDataIterator::new(reader);
-    execute_fuzz(data_iter, n_members, n_batches).await;
-}
-
-async fn generate_fuzz_async<W: Write + Send + 'static>(
-    output: W,
+async fn execute_generate_fuzz<W: Write + Send + 'static>(
+    mut output: W,
     n_members: usize,
     n_batches: usize,
 ) {
-    let spawner = Spawner::new();
-    let file = BufWriter::new(output);
     let peer_id = NodeIndex(0);
-    let network_hook = EvesdroppingHook::new(file);
-    // spawn only byzantine-threshold of nodes and networks so all nodes are essential to finish each round
+    let encoder = NetworkDataEncoding::new();
+    let spy = move |data: &NetworkData, sender: NodeIndex, recipient: NodeIndex| {
+        if recipient == peer_id {
+            encoder.encode_into(data, &mut output).unwrap();
+        }
+    };
+    let network_hook = ClosureHook::new(spy);
+    // spawn only byzantine-threshold of nodes and networks so all enabled nodes are required to finish each round
     let threshold = (n_members * 2) / 3 + 1;
     let (mut router, mut networks) =
         configure_network(n_members, 1.0, (0..threshold).map(NodeIndex));
-    let filtering_hook = new_for_peer_id(network_hook, peer_id);
-    router.add_hook(filtering_hook);
+    router.add_hook(network_hook);
 
+    let spawner = Spawner::new();
     spawner.spawn("network", async move { router.run().await });
 
     let mut batch_rxs = Vec::new();
@@ -224,24 +186,12 @@ async fn generate_fuzz_async<W: Write + Send + 'static>(
     spawner.wait().await;
 }
 
-pub fn generate_fuzz<W: Write + Send + 'static>(output: W, n_members: usize, n_batches: usize) {
-    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
-    runtime.block_on(generate_fuzz_async(output, n_members, n_batches));
-}
-
-pub fn fuzz(data: Vec<NetworkData>, n_members: usize, n_batches: Option<usize>) {
-    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
-    runtime.block_on(execute_fuzz(data.into_iter(), n_members, n_batches));
-    // runtime.shutdown_background();
-}
-
-pub async fn execute_fuzz(
+async fn execute_fuzz(
     data: impl Iterator<Item = NetworkData> + Send + 'static,
     n_members: usize,
     n_batches: Option<usize>,
 ) {
     const NETWORK_DELAY: u64 = 1;
-    let spawner = Spawner::new();
     let (empty_tx, mut empty_rx) = oneshot::channel();
     let data = after_iter(data.into_iter(), move || {
         empty_tx.send(()).expect("empty_rx was already closed");
@@ -250,6 +200,7 @@ pub async fn execute_fuzz(
     let (net_exit, net_exit_rx) = oneshot::channel();
     let network = RecorderNetwork::new(data, NETWORK_DELAY, net_exit_rx);
 
+    let spawner = Spawner::new();
     let (mut batch_rx, exit_tx) = spawn_honest_member(spawner.clone(), 0, n_members, network);
 
     let (n_batches, batches_expected) = {
@@ -269,7 +220,13 @@ pub async fn execute_fuzz(
                     break;
                 }
             }
-            _ = empty_rx => break,
+            _ = empty_rx => {
+                if !batches_expected {
+                    // let it process all received data
+                    Delay::new(Duration::from_secs(1)).await;
+                    break;
+                }
+            }
         }
     }
 
@@ -288,47 +245,25 @@ pub async fn execute_fuzz(
 
     exit_tx
         .send(())
-        .unwrap_or(info!("exit_rx channel is already closed"));
+        .unwrap_or(info!("exit channel is already closed"));
 
     spawner.wait().await;
 }
 
-async fn generate_fuzz_corpus(fuzz_output: &Path) {
-    let output = File::create(fuzz_output).expect("ubable to create a corpus file");
-    generate_fuzz_async(output, 4, 30).await
-}
-
-async fn load_fuzz_corpus(fuzz_input: &Path) {
-    load_fuzz(fuzz_input.as_ref(), 4, Some(30)).await
-}
-
-#[tokio::test]
-#[ignore]
-async fn fuzz_loop() {
-    let fuzz_output = Path::new("fuzz.corpus");
-    generate_fuzz_corpus(fuzz_output).await;
-    load_fuzz_corpus(fuzz_output).await;
-}
-
-pub fn check_fuzz() {
-    let fuzz_output = Path::new("fuzz.corpus");
-
+pub fn generate_fuzz<W: Write + Send + 'static>(output: W, n_members: usize, n_batches: usize) {
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
-    runtime.block_on(async move {
-        generate_fuzz_corpus(fuzz_output).await;
-        load_fuzz_corpus(fuzz_output).await;
-    });
-    // runtime.shutdown_background();
+    runtime.block_on(execute_generate_fuzz(output, n_members, n_batches));
 }
 
-pub fn check_fuzz_from_input(
-    input: impl Read + Send + 'static,
-    n_members: usize,
-    n_batches: Option<usize>,
-) {
+pub fn check_fuzz(input: impl Read + Send + 'static, n_members: usize, n_batches: Option<usize>) {
     let data_iter = NetworkDataIterator::new(input);
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async move {
         execute_fuzz(data_iter, n_members, n_batches).await;
     });
+}
+
+pub fn fuzz(data: Vec<NetworkData>, n_members: usize, n_batches: Option<usize>) {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(execute_fuzz(data.into_iter(), n_members, n_batches));
 }
