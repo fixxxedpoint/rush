@@ -43,7 +43,8 @@ impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
 fn main() {
     fuzz!(|data: &[u8]| {
         let data: Vec<NetworkData> = ReadToNetworkDataIterator::new(data).collect();
-        let max_number_of_batches = data.len();
-        fuzz(data, 4, max_number_of_batches);
+        // let max_number_of_batches = data.len();
+        // fuzz(data, 4, max_number_of_batches);
+        fuzz(data, 4, 30);
     });
 }

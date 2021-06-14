@@ -176,7 +176,7 @@ impl<I: Iterator<Item = NetworkData> + Send>
     }
 }
 
-async fn load_fuzz(path: &Path, n_members: usize, n_batches: usize) {
+async fn load_fuzz(path: &Path, n_members: usize, n_batches: Option<usize>) {
     let reader = BufReader::new(File::open(path).expect("unable to open a corpus file"));
     let data_iter = NetworkDataIterator::new(reader);
     execute_fuzz(data_iter, n_members, n_batches).await;
@@ -229,18 +229,18 @@ pub fn generate_fuzz<W: Write + Send + 'static>(output: W, n_members: usize, n_b
     runtime.block_on(generate_fuzz_async(output, n_members, n_batches));
 }
 
-pub fn fuzz(data: Vec<NetworkData>, n_members: usize, n_batches: usize) {
+pub fn fuzz(data: Vec<NetworkData>, n_members: usize, n_batches: Option<usize>) {
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(execute_fuzz(data.into_iter(), n_members, n_batches));
-    runtime.shutdown_background();
+    // runtime.shutdown_background();
 }
 
 pub async fn execute_fuzz(
     data: impl Iterator<Item = NetworkData> + Send + 'static,
     n_members: usize,
-    n_batches: usize,
+    n_batches: Option<usize>,
 ) {
-    const NETWORK_DELAY: u64 = 32;
+    const NETWORK_DELAY: u64 = 1;
     let spawner = Spawner::new();
     let (empty_tx, mut empty_rx) = oneshot::channel();
     let data = after_iter(data.into_iter(), move || {
@@ -252,8 +252,13 @@ pub async fn execute_fuzz(
 
     let (mut batch_rx, exit_tx) = spawn_honest_member(spawner.clone(), 0, n_members, network);
 
-    // empty_rx.await.expect("empty_tx was unexpectedly dropped");
-
+    let (n_batches, batches_expected) = {
+        if let Some(batches) = n_batches {
+            (batches, true)
+        } else {
+            (usize::max_value(), false)
+        }
+    };
     let mut batches_count = 0;
     while batches_count < n_batches {
         futures::select! {
@@ -268,12 +273,14 @@ pub async fn execute_fuzz(
         }
     }
 
-    assert!(
-        batches_count >= n_batches,
-        "Expected at least {:?} batches, but received {:?}.",
-        n_batches,
-        batches_count
-    );
+    if batches_expected {
+        assert!(
+            batches_count >= n_batches,
+            "Expected at least {:?} batches, but received {:?}.",
+            n_batches,
+            batches_count
+        );
+    }
 
     net_exit
         .send(())
@@ -292,7 +299,7 @@ async fn generate_fuzz_corpus(fuzz_output: &Path) {
 }
 
 async fn load_fuzz_corpus(fuzz_input: &Path) {
-    load_fuzz(fuzz_input.as_ref(), 4, 30).await
+    load_fuzz(fuzz_input.as_ref(), 4, Some(30)).await
 }
 
 #[tokio::test]
@@ -312,4 +319,16 @@ pub fn check_fuzz() {
         load_fuzz_corpus(fuzz_output).await;
     });
     // runtime.shutdown_background();
+}
+
+pub fn check_fuzz_from_input(
+    input: impl Read + Send + 'static,
+    n_members: usize,
+    n_batches: Option<usize>,
+) {
+    let data_iter = NetworkDataIterator::new(input);
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async move {
+        execute_fuzz(data_iter, n_members, n_batches).await;
+    });
 }
