@@ -31,7 +31,7 @@ impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
         }
         match self.decoder.decode_from(&mut self.read) {
             Ok(v) => Some(v),
-            // otherwise try to read until you reach the END-OF-FILE
+            // otherwise try to read until you reach END-OF-FILE
             Err(e) => {
                 error!(target: "fuzz_target_1", "Unable to parse NetworkData: {:?}.", e);
                 self.next()
@@ -45,6 +45,6 @@ fn main() {
         let data: Vec<NetworkData> = ReadToNetworkDataIterator::new(data).collect();
         // let max_number_of_batches = data.len();
         // fuzz(data, 4, max_number_of_batches);
-        fuzz(data, 4, 30);
+        fuzz(data, 4, None);
     });
 }

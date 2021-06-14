@@ -8,11 +8,12 @@ edition = "2018"
 cargo-fuzz = true
 
 [dependencies]
+aleph-bft = { path = "..", features = ["fuzz"] }
 libfuzzer-sys = { version = "0.4" }
 afl = { version = "0.8", optional = true }
 codec = { package = "parity-scale-codec", version = "1", default-features = false, features = ["derive", "std"] }
-log = "*"
-aleph-bft = { path = "..", features = ["fuzz"] }
+log = "0.4"
+structopt = "0.3.8"
 
 [features]
 default = []
