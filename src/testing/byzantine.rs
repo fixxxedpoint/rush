@@ -216,11 +216,7 @@ async fn honest_members_agree_on_batches_byzantine(
     let spawner = Spawner::new();
     let mut batch_rxs = vec![];
     let mut exits = vec![];
-    let (mut net_hub, networks) = configure_network(
-        n_members,
-        network_reliability,
-        (0..n_members).map(NodeIndex),
-    );
+    let (mut net_hub, networks) = configure_network(n_members, network_reliability);
 
     let alert_hook = AlertHook::new();
     net_hub.add_hook(alert_hook.clone());
@@ -228,7 +224,7 @@ async fn honest_members_agree_on_batches_byzantine(
     spawner.spawn("network-hub", async move { net_hub.run().await });
 
     for network in networks {
-        let ix = network.index.into();
+        let ix = network.index().into();
         if ix >= n_honest {
             let exit_tx = spawn_malicious_member(spawner.clone(), ix, n_members, 2, network);
             exits.push(exit_tx);
