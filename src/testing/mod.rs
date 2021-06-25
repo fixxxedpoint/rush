@@ -8,7 +8,7 @@ mod consensus;
 mod crash;
 #[cfg(test)]
 mod dag;
-#[cfg(any(test, feature = "fuzzing"))]
+#[cfg(test)]
 pub mod mock;
 #[cfg(test)]
 mod rmc;

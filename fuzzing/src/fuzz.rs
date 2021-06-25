@@ -1,0 +1,438 @@
+pub use aleph_bft::testing::mock::NetworkData;
+
+use aleph_bft::{
+    testing::mock::{
+        configure_network, init_log, spawn_honest_member, Data, Hasher64, NetworkHook,
+        PartialMultisignature, Signature, Spawner,
+    },
+    Network, NodeIndex, SpawnHandle,
+};
+
+use codec::{Decode, Encode, IoReader};
+
+use futures::{
+    channel::oneshot::{self, Receiver},
+    StreamExt,
+};
+
+use futures_timer::Delay;
+use log::{error, info};
+
+use std::{
+    io::{BufRead, BufReader, Read, Result as IOResult, Write},
+    time::Duration,
+};
+
+use tokio::runtime::{Builder, Runtime};
+
+struct SpyingNetworkHook<W: Write> {
+    node: NodeIndex,
+    encoder: NetworkDataEncoding,
+    output: W,
+}
+
+impl<W: Write> SpyingNetworkHook<W> {
+    fn new(node: NodeIndex, output: W) -> Self {
+        SpyingNetworkHook {
+            node,
+            encoder: NetworkDataEncoding::default(),
+            output,
+        }
+    }
+}
+
+impl<W: Write + Send> NetworkHook for SpyingNetworkHook<W> {
+    fn update_state(&mut self, data: &mut NetworkData, _: NodeIndex, recipient: NodeIndex) {
+        if self.node == recipient {
+            self.encoder.encode_into(data, &mut self.output).unwrap();
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct NetworkDataEncoding {}
+
+impl NetworkDataEncoding {
+    pub(crate) fn encode_into<W: Write>(&self, data: &NetworkData, writer: &mut W) -> IOResult<()> {
+        writer.write_all(&data.encode()[..])
+    }
+
+    pub(crate) fn decode_from<R: Read>(
+        &self,
+        reader: &mut R,
+    ) -> core::result::Result<NetworkData, codec::Error> {
+        let mut reader = IoReader(reader);
+        <NetworkData>::decode(&mut reader)
+    }
+}
+
+struct NetworkDataIterator<R> {
+    input: R,
+    encoding: NetworkDataEncoding,
+}
+
+impl<R: Read> NetworkDataIterator<R> {
+    fn new(read: R) -> Self {
+        NetworkDataIterator {
+            input: read,
+            encoding: NetworkDataEncoding::default(),
+        }
+    }
+}
+
+impl<R: Read> Iterator for NetworkDataIterator<R> {
+    type Item = NetworkData;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.encoding.decode_from(&mut self.input) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                error!("Error while decoding NetworkData: {:?}.", e);
+                None
+            }
+        }
+    }
+}
+
+struct PlaybackNetwork<I, C> {
+    data: I,
+    delay: Duration,
+    next_delay: Delay,
+    exit: Receiver<()>,
+    finished_callback: Option<C>,
+}
+
+impl<I, C> PlaybackNetwork<I, C> {
+    fn new(data: I, delay_millis: u64, exit: Receiver<()>, finished: C) -> Self {
+        PlaybackNetwork {
+            data,
+            delay: Duration::from_millis(delay_millis),
+            next_delay: Delay::new(Duration::from_millis(delay_millis)),
+            exit,
+            finished_callback: Some(finished),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<I: Iterator<Item = NetworkData> + Send, C: FnOnce() + Send>
+    Network<Hasher64, Data, Signature, PartialMultisignature> for PlaybackNetwork<I, C>
+{
+    type Error = ();
+
+    fn send(&self, _: NetworkData, _: NodeIndex) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn broadcast(&self, _: NetworkData) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn next_event(&mut self) -> Option<NetworkData> {
+        (&mut self.next_delay).await;
+        self.next_delay.reset(self.delay);
+        match self.data.next() {
+            Some(v) => Some(v),
+            None => {
+                if let Some(finished_call) = self.finished_callback.take() {
+                    (finished_call)();
+                }
+                // wait for an exit call when no more data is available
+                let _ = (&mut self.exit).await;
+                None
+            }
+        }
+    }
+}
+
+pub struct ReadToNetworkDataIterator<R> {
+    read: BufReader<R>,
+    decoder: NetworkDataEncoding,
+}
+
+impl<R: Read> ReadToNetworkDataIterator<R> {
+    pub fn new(read: R) -> Self {
+        ReadToNetworkDataIterator {
+            read: BufReader::new(read),
+            decoder: NetworkDataEncoding::default(),
+        }
+    }
+}
+
+impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
+    type Item = NetworkData;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Ok(buf) = self.read.fill_buf() {
+            if buf.is_empty() {
+                return None;
+            }
+        }
+        match self.decoder.decode_from(&mut self.read) {
+            Ok(v) => Some(v),
+            // otherwise try to read until you reach END-OF-FILE
+            Err(e) => {
+                error!(target: "fuzz_target_1", "Unable to parse NetworkData: {:?}.", e);
+                self.next()
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Hash)]
+pub struct Data {
+    ix: NodeIndex,
+    id: u64,
+}
+
+impl Data {
+    fn new(ix: NodeIndex, id: u64) -> Self {
+        Data { ix, id }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct Signature {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct PartialMultisignature {
+    signed_by: Vec<NodeIndex>,
+}
+
+impl PartialMultisignatureT for PartialMultisignature {
+    type Signature = Signature;
+    fn add_signature(self, _: &Self::Signature, index: NodeIndex) -> Self {
+        let Self { mut signed_by } = self;
+        for id in &signed_by {
+            if *id == index {
+                return Self { signed_by };
+            }
+        }
+        signed_by.push(index);
+        Self { signed_by }
+    }
+}
+
+pub struct DataIO {
+    ix: NodeIndex,
+    round_counter: Cell<u64>,
+    tx: UnboundedSender<OrderedBatch<Data>>,
+}
+
+impl DataIOT<Data> for DataIO {
+    type Error = ();
+    fn get_data(&self) -> Data {
+        self.round_counter.set(self.round_counter.get() + 1);
+        Data::new(self.ix, self.round_counter.get())
+    }
+    fn check_availability(
+        &self,
+        _: &Data,
+    ) -> Option<Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send>>> {
+        None
+    }
+    fn send_ordered_batch(&mut self, data: OrderedBatch<Data>) -> Result<(), ()> {
+        self.tx.unbounded_send(data).map_err(|e| {
+            error!(target: "data-io", "Error when sending data from DataIO {:?}.", e);
+        })
+    }
+}
+
+impl DataIO {
+    pub fn new(ix: NodeIndex) -> (Self, UnboundedReceiver<OrderedBatch<Data>>) {
+        let (tx, rx) = unbounded();
+        let data_io = DataIO {
+            ix,
+            round_counter: Cell::new(0),
+            tx,
+        };
+        (data_io, rx)
+    }
+}
+
+#[derive(Clone)]
+pub struct KeyBox {
+    count: NodeCount,
+    ix: NodeIndex,
+}
+
+impl KeyBox {
+    pub fn new(count: NodeCount, ix: NodeIndex) -> Self {
+        KeyBox { count, ix }
+    }
+}
+
+impl Index for KeyBox {
+    fn index(&self) -> NodeIndex {
+        self.ix
+    }
+}
+
+#[async_trait]
+impl KeyBoxT for KeyBox {
+    type Signature = Signature;
+
+    fn node_count(&self) -> NodeCount {
+        self.count
+    }
+
+    async fn sign(&self, _msg: &[u8]) -> Signature {
+        Signature {}
+    }
+
+    fn verify(&self, _msg: &[u8], _sgn: &Signature, _index: NodeIndex) -> bool {
+        true
+    }
+}
+
+impl MultiKeychainT for KeyBox {
+    type PartialMultisignature = PartialMultisignature;
+    fn from_signature(&self, _: &Self::Signature, index: NodeIndex) -> Self::PartialMultisignature {
+        let signed_by = vec![index];
+        PartialMultisignature { signed_by }
+    }
+    fn is_complete(&self, _: &[u8], partial: &Self::PartialMultisignature) -> bool {
+        (self.count * 2) / 3 < NodeCount(partial.signed_by.len())
+    }
+}
+
+async fn execute_generate_fuzz<W: Write + Send + 'static>(
+    output: W,
+    n_members: usize,
+    n_batches: usize,
+) {
+    let peer_id = NodeIndex(0);
+    let spy = SpyingNetworkHook::new(peer_id, output);
+    // spawn only byzantine-threshold of nodes and networks so all enabled nodes are required to finish each round
+    let threshold = (n_members * 2) / 3 + 1;
+    let (mut router, networks) = configure_network(n_members, 1.0);
+    router.add_hook(spy);
+
+    let spawner = Spawner::new();
+    spawner.spawn("network", router);
+
+    let mut batch_rxs = Vec::new();
+    let mut exits = Vec::new();
+    for network in networks.into_iter().take(threshold) {
+        let (batch_rx, exit_tx) =
+            spawn_honest_member(spawner.clone(), network.index(), n_members, network);
+        exits.push(exit_tx);
+        batch_rxs.push(batch_rx);
+    }
+
+    for mut rx in batch_rxs.drain(..) {
+        for _ in 0..n_batches {
+            rx.next().await.expect("unable to retrieve a batch");
+        }
+    }
+    for e in exits.drain(..) {
+        let _ = e.send(());
+    }
+    spawner.wait().await;
+}
+
+async fn execute_fuzz(
+    data: impl Iterator<Item = NetworkData> + Send + 'static,
+    n_members: usize,
+    n_batches: Option<usize>,
+) {
+    const NETWORK_DELAY: u64 = 1;
+
+    let (net_exit, net_exit_rx) = oneshot::channel();
+    let (playback_finished_tx, mut playback_finished_rx) = oneshot::channel();
+    let finished_callback = move || {
+        playback_finished_tx
+            .send(())
+            .expect("finished_callback channel already closed");
+    };
+    let network = PlaybackNetwork::new(data, NETWORK_DELAY, net_exit_rx, finished_callback);
+
+    let spawner = Spawner::new();
+    let (mut batch_rx, exit_tx) =
+        spawn_honest_member(spawner.clone(), NodeIndex(0), n_members, network);
+
+    let (n_batches, batches_expected) = {
+        if let Some(batches) = n_batches {
+            (batches, true)
+        } else {
+            (usize::max_value(), false)
+        }
+    };
+    let mut batches_count = 0;
+    while batches_count < n_batches {
+        futures::select! {
+            batch = batch_rx.next() => {
+                if batch.is_some() {
+                    batches_count += 1;
+                } else {
+                    break;
+                }
+            }
+            _ = playback_finished_rx => {
+                if !batches_expected {
+                    // let it process all received data
+                    Delay::new(Duration::from_secs(1)).await;
+                    break;
+                }
+            }
+        }
+    }
+
+    if batches_expected {
+        assert!(
+            batches_count >= n_batches,
+            "Expected at least {:?} batches, but received {:?}.",
+            n_batches,
+            batches_count
+        );
+    }
+
+    if net_exit.send(()).is_err() {
+        info!("net_exit channel is already closed");
+    }
+    if exit_tx.send(()).is_err() {
+        info!("exit channel is already closed");
+    }
+    spawner.wait().await;
+}
+
+fn get_runtime() -> Runtime {
+    Builder::new_current_thread().enable_all().build().unwrap()
+}
+
+pub fn generate_fuzz<W: Write + Send + 'static>(output: W, n_members: usize, n_batches: usize) {
+    let runtime = get_runtime();
+    runtime.block_on(execute_generate_fuzz(output, n_members, n_batches));
+}
+
+pub fn check_fuzz(input: impl Read + Send + 'static, n_members: usize, n_batches: Option<usize>) {
+    init_log();
+    let data_iter = NetworkDataIterator::new(input);
+    let runtime = get_runtime();
+    runtime.block_on(execute_fuzz(data_iter, n_members, n_batches));
+}
+
+pub fn fuzz(data: Vec<NetworkData>, n_members: usize, n_batches: Option<usize>) {
+    let runtime = get_runtime();
+    runtime.block_on(execute_fuzz(data.into_iter(), n_members, n_batches));
+}
+
+// pub fn gen_config(node_ix: NodeIndex, n_members: NodeCount) -> Config {
+//     let delay_config = DelayConfig {
+//         tick_interval: Duration::from_millis(5),
+//         requests_interval: Duration::from_millis(50),
+//         unit_broadcast_delay: Arc::new(|t| exponential_slowdown(t, 100.0, 1, 3.0)),
+//         //100, 100, 300, 900, 2700, ...
+//         unit_creation_delay: Arc::new(|t| exponential_slowdown(t, 50.0, usize::MAX, 1.000)),
+//         //50, 50, 50, 50, ...
+//     };
+//     Config {
+//         node_ix,
+//         session_id: 0,
+//         n_members,
+//         delay_config,
+//         rounds_margin: 200,
+//         max_units_per_alert: 200,
+//         max_round: 5000,
+//     }
+// }

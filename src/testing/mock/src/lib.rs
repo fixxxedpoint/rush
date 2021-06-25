@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 
 use futures::{
     channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
+    channel::oneshot,
     Future, StreamExt,
 };
 
@@ -18,8 +19,8 @@ use std::{
 };
 
 use aleph_bft::{
-    DataIO as DataIOT, Hasher, Index, KeyBox as KeyBoxT, MultiKeychain as MultiKeychainT,
-    Network as NetworkT, NodeCount, NodeIndex, OrderedBatch,
+    Config, DataIO as DataIOT, Hasher, Index, KeyBox as KeyBoxT, Member,
+    MultiKeychain as MultiKeychainT, Network as NetworkT, NodeCount, NodeIndex, OrderedBatch,
     PartialMultisignature as PartialMultisignatureT, SpawnHandle,
 };
 
@@ -44,6 +45,8 @@ impl Hasher for Hasher64 {
         hasher.finish().to_ne_bytes()
     }
 }
+
+pub type Hash64 = <Hasher64 as Hasher>::Hash;
 
 #[derive(Clone)]
 pub struct Spawner {
@@ -346,4 +349,21 @@ pub fn configure_network(n_members: usize, reliability: f64) -> (UnreliableRoute
         networks.push(network);
     }
     (router, networks)
+}
+
+pub fn spawn_honest_member_generic<D: aleph_bft::Data, H: Hasher, K: MultiKeychainT>(
+    spawner: impl SpawnHandle,
+    config: Config,
+    network: impl 'static + NetworkT<H, D, K::Signature, K::PartialMultisignature>,
+    data_io: impl DataIOT<D> + Send + 'static,
+    mk: &'static K,
+) -> oneshot::Sender<()> {
+    let (exit_tx, exit_rx) = oneshot::channel();
+    let spawner_inner = spawner.clone();
+    let member_task = async move {
+        let member = Member::new(data_io, mk, config, spawner_inner.clone());
+        member.run_session(network, exit_rx).await;
+    };
+    spawner.spawn("member", member_task);
+    exit_tx
 }
