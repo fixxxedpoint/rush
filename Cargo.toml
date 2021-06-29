@@ -38,4 +38,5 @@ aleph_mock = { path = "./src/testing/mock" }
 
 [features]
 # fuzzing = ["env_logger", "codec/std", "tokio/rt"]
-fuzzing = ["codec/std", "tokio/rt"]
+# fuzzing = ["codec/std", "tokio/rt"]
+mock_common = []

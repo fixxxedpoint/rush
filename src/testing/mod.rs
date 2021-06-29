@@ -9,7 +9,9 @@ mod crash;
 #[cfg(test)]
 mod dag;
 #[cfg(test)]
-pub mod mock;
+pub(crate) mod mock;
+#[cfg(feature = "mock_common")]
+pub mod mock_common;
 #[cfg(test)]
 mod rmc;
 #[cfg(test)]

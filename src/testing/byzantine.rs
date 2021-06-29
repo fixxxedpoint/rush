@@ -228,7 +228,8 @@ async fn honest_members_agree_on_batches_byzantine(
             let exit_tx = spawn_malicious_member(spawner.clone(), ix, n_members, 2, network);
             exits.push(exit_tx);
         } else {
-            let (batch_rx, exit_tx) = spawn_honest_member(spawner.clone(), ix, n_members, network);
+            let (batch_rx, exit_tx) =
+                spawn_honest_member(spawner.clone(), network.index(), n_members, network);
             batch_rxs.push(batch_rx);
             exits.push(exit_tx);
         }

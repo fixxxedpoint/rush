@@ -1,18 +1,22 @@
-pub use aleph_bft::testing::mock::NetworkData;
+use aleph_bft::Index;
+use aleph_bft::KeyBox as KeyBoxT;
+use aleph_bft::MultiKeychain as MultiKeychainT;
+pub use aleph_mock::NetworkData;
 
-use aleph_bft::{
-    testing::mock::{
-        configure_network, init_log, spawn_honest_member, Data, Hasher64, NetworkHook,
-        PartialMultisignature, Signature, Spawner,
-    },
-    Network, NodeIndex, SpawnHandle,
-};
+use aleph_bft::DataIO as DataIOT;
+use aleph_bft::OrderedBatch;
+use aleph_bft::PartialMultisignature as PartialMultisignatureT;
+use std::pin::Pin;
+
+use aleph_bft::{NodeCount, NodeIndex, SpawnHandle};
+use aleph_mock::{configure_network, init_log, spawn_honest_member_generic, NetworkHook, Spawner};
 
 use codec::{Decode, Encode, IoReader};
 
 use futures::{
+    channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
     channel::oneshot::{self, Receiver},
-    StreamExt,
+    Future, StreamExt,
 };
 
 use futures_timer::Delay;
@@ -23,6 +27,7 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
 use tokio::runtime::{Builder, Runtime};
 
 struct SpyingNetworkHook<W: Write> {
@@ -116,7 +121,8 @@ impl<I, C> PlaybackNetwork<I, C> {
 
 #[async_trait::async_trait]
 impl<I: Iterator<Item = NetworkData> + Send, C: FnOnce() + Send>
-    Network<Hasher64, Data, Signature, PartialMultisignature> for PlaybackNetwork<I, C>
+    aleph_bft::Network<aleph_mock::Hasher64, Data, Signature, PartialMultisignature>
+    for PlaybackNetwork<I, C>
 {
     type Error = ();
 
@@ -180,14 +186,11 @@ impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Hash)]
-pub struct Data {
-    ix: NodeIndex,
-    id: u64,
-}
+pub struct Data {}
 
 impl Data {
-    fn new(ix: NodeIndex, id: u64) -> Self {
-        Data { ix, id }
+    fn new() -> Self {
+        Data {}
     }
 }
 
@@ -214,23 +217,22 @@ impl PartialMultisignatureT for PartialMultisignature {
 }
 
 pub struct DataIO {
-    ix: NodeIndex,
-    round_counter: Cell<u64>,
     tx: UnboundedSender<OrderedBatch<Data>>,
 }
 
-impl DataIOT<Data> for DataIO {
+impl DataIOT<self::Data> for DataIO {
     type Error = ();
     fn get_data(&self) -> Data {
-        self.round_counter.set(self.round_counter.get() + 1);
-        Data::new(self.ix, self.round_counter.get())
+        Data::new()
     }
+
     fn check_availability(
         &self,
         _: &Data,
     ) -> Option<Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send>>> {
         None
     }
+
     fn send_ordered_batch(&mut self, data: OrderedBatch<Data>) -> Result<(), ()> {
         self.tx.unbounded_send(data).map_err(|e| {
             error!(target: "data-io", "Error when sending data from DataIO {:?}.", e);
@@ -239,13 +241,9 @@ impl DataIOT<Data> for DataIO {
 }
 
 impl DataIO {
-    pub fn new(ix: NodeIndex) -> (Self, UnboundedReceiver<OrderedBatch<Data>>) {
+    pub fn new() -> (Self, UnboundedReceiver<OrderedBatch<Data>>) {
         let (tx, rx) = unbounded();
-        let data_io = DataIO {
-            ix,
-            round_counter: Cell::new(0),
-            tx,
-        };
+        let data_io = DataIO { tx };
         (data_io, rx)
     }
 }
@@ -314,18 +312,26 @@ async fn execute_generate_fuzz<W: Write + Send + 'static>(
     let mut batch_rxs = Vec::new();
     let mut exits = Vec::new();
     for network in networks.into_iter().take(threshold) {
-        let (batch_rx, exit_tx) =
-            spawn_honest_member(spawner.clone(), network.index(), n_members, network);
+        let (data_io, batch_rx) = DataIO::new();
+        let keybox = KeyBox::new(NodeCount(n_members), network.index());
+        let exit_tx = aleph_mock::spawn_honest_member_generic(
+            spawner.clone(),
+            network.index(),
+            n_members,
+            network,
+            data_io,
+            keybox,
+        );
         exits.push(exit_tx);
         batch_rxs.push(batch_rx);
     }
 
-    for mut rx in batch_rxs.drain(..) {
+    for mut rx in batch_rxs {
         for _ in 0..n_batches {
             rx.next().await.expect("unable to retrieve a batch");
         }
     }
-    for e in exits.drain(..) {
+    for e in exits {
         let _ = e.send(());
     }
     spawner.wait().await;
@@ -348,8 +354,17 @@ async fn execute_fuzz(
     let network = PlaybackNetwork::new(data, NETWORK_DELAY, net_exit_rx, finished_callback);
 
     let spawner = Spawner::new();
-    let (mut batch_rx, exit_tx) =
-        spawn_honest_member(spawner.clone(), NodeIndex(0), n_members, network);
+    let node_index = NodeIndex(0);
+    let (data_io, mut batch_rx) = DataIO::new(node_index);
+    let keybox = KeyBox::new(n_members, node_index);
+    let exit_tx = spawn_honest_member_generic(
+        spawner.clone(),
+        NodeIndex(0),
+        n_members,
+        network,
+        data_io,
+        keybox,
+    );
 
     let (n_batches, batches_expected) = {
         if let Some(batches) = n_batches {
@@ -416,23 +431,3 @@ pub fn fuzz(data: Vec<NetworkData>, n_members: usize, n_batches: Option<usize>) 
     let runtime = get_runtime();
     runtime.block_on(execute_fuzz(data.into_iter(), n_members, n_batches));
 }
-
-// pub fn gen_config(node_ix: NodeIndex, n_members: NodeCount) -> Config {
-//     let delay_config = DelayConfig {
-//         tick_interval: Duration::from_millis(5),
-//         requests_interval: Duration::from_millis(50),
-//         unit_broadcast_delay: Arc::new(|t| exponential_slowdown(t, 100.0, 1, 3.0)),
-//         //100, 100, 300, 900, 2700, ...
-//         unit_creation_delay: Arc::new(|t| exponential_slowdown(t, 50.0, usize::MAX, 1.000)),
-//         //50, 50, 50, 50, ...
-//     };
-//     Config {
-//         node_ix,
-//         session_id: 0,
-//         n_members,
-//         delay_config,
-//         rounds_margin: 200,
-//         max_units_per_alert: 200,
-//         max_round: 5000,
-//     }
-// }

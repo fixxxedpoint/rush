@@ -18,9 +18,11 @@ use std::{
     task::{Context, Poll},
 };
 
+use aleph_bft::testing::mock_common::gen_config;
+
 use aleph_bft::{
-    Config, DataIO as DataIOT, Hasher, Index, KeyBox as KeyBoxT, Member,
-    MultiKeychain as MultiKeychainT, Network as NetworkT, NodeCount, NodeIndex, OrderedBatch,
+    DataIO as DataIOT, Hasher, Index, KeyBox as KeyBoxT, Member, MultiKeychain as MultiKeychainT,
+    Network as NetworkT, NodeCount, NodeIndex, OrderedBatch,
     PartialMultisignature as PartialMultisignatureT, SpawnHandle,
 };
 
@@ -82,24 +84,35 @@ pub type NetworkData = aleph_bft::NetworkData<Hasher64, Data, Signature, Partial
 type NetworkReceiver = UnboundedReceiver<(NetworkData, NodeIndex)>;
 type NetworkSender = UnboundedSender<(NetworkData, NodeIndex)>;
 
-pub struct Network {
-    rx: NetworkReceiver,
-    tx: NetworkSender,
+pub struct Network<
+    H: aleph_bft::Hasher,
+    D: aleph_bft::Data,
+    S: aleph_bft::Signature,
+    MS: aleph_bft::PartialMultisignature,
+> {
+    rx: UnboundedReceiver<(aleph_bft::NetworkData<H, D, S, MS>, NodeIndex)>,
+    tx: UnboundedSender<(aleph_bft::NetworkData<H, D, S, MS>, NodeIndex)>,
     peers: Vec<NodeIndex>,
     index: NodeIndex,
 }
 
-impl Network {
+impl<H, D, S, MS> Network<H, D, S, MS> {
     pub fn index(&self) -> NodeIndex {
         self.index
     }
 }
 
 #[async_trait::async_trait]
-impl NetworkT<Hasher64, Data, Signature, PartialMultisignature> for Network {
+impl<
+        H: aleph_bft::Hasher,
+        D: aleph_bft::Data,
+        S: aleph_bft::Signature,
+        MS: aleph_bft::PartialMultisignature,
+    > NetworkT<H, D, S, MS> for Network<H, D, S, MS>
+{
     type Error = ();
 
-    fn broadcast(&self, data: NetworkData) -> Result<(), Self::Error> {
+    fn broadcast(&self, data: aleph_bft::NetworkData<H, D, S, MS>) -> Result<(), Self::Error> {
         for peer in self.peers.iter() {
             if *peer != self.index {
                 self.send(data.clone(), *peer)?;
@@ -108,11 +121,15 @@ impl NetworkT<Hasher64, Data, Signature, PartialMultisignature> for Network {
         Ok(())
     }
 
-    fn send(&self, data: NetworkData, node: NodeIndex) -> Result<(), Self::Error> {
+    fn send(
+        &self,
+        data: aleph_bft::NetworkData<H, D, S, MS>,
+        node: NodeIndex,
+    ) -> Result<(), Self::Error> {
         self.tx.unbounded_send((data, node)).map_err(|_| ())
     }
 
-    async fn next_event(&mut self) -> Option<NetworkData> {
+    async fn next_event(&mut self) -> Option<aleph_bft::NetworkData<H, D, S, MS>> {
         Some(self.rx.next().await?.0)
     }
 }
@@ -122,14 +139,14 @@ struct Peer {
     rx: NetworkReceiver,
 }
 
-pub struct UnreliableRouter {
+pub struct UnreliableRouter<H, D, S, MS> {
     peers: RefCell<HashMap<NodeIndex, Peer>>,
     peer_list: Vec<NodeIndex>,
-    hook_list: RefCell<Vec<Box<dyn NetworkHook>>>,
+    hook_list: RefCell<Vec<Box<dyn NetworkHook<H, D, S, MS>>>>,
     reliability: f64, //a number in the range [0, 1], 1.0 means perfect reliability, 0.0 means no message gets through
 }
 
-impl UnreliableRouter {
+impl<H, D, S, MS> UnreliableRouter<H, D, S, MS> {
     pub fn new(peer_list: Vec<NodeIndex>, reliability: f64) -> Self {
         UnreliableRouter {
             peers: RefCell::new(HashMap::new()),
@@ -139,11 +156,11 @@ impl UnreliableRouter {
         }
     }
 
-    pub fn add_hook<HK: NetworkHook + 'static>(&mut self, hook: HK) {
+    pub fn add_hook<HK: NetworkHook<H, D, S, MS> + 'static>(&mut self, hook: HK) {
         self.hook_list.borrow_mut().push(Box::new(hook));
     }
 
-    pub fn connect_peer(&mut self, peer: NodeIndex) -> Network {
+    pub fn connect_peer(&mut self, peer: NodeIndex) -> Network<H, D, S, MS> {
         assert!(
             self.peer_list.iter().any(|p| *p == peer),
             "Must connect a peer in the list."
@@ -168,7 +185,7 @@ impl UnreliableRouter {
     }
 }
 
-impl Future for UnreliableRouter {
+impl<H, D, S, MS> Future for UnreliableRouter<H, D, S, MS> {
     type Output = ();
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut self;
@@ -218,8 +235,13 @@ impl Future for UnreliableRouter {
     }
 }
 
-pub trait NetworkHook: Send {
-    fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex);
+pub trait NetworkHook<H, D, S, MS>: Send {
+    fn update_state(
+        &mut self,
+        data: &mut aleph_bft::NetworkData<H, D, S, MS>,
+        sender: NodeIndex,
+        recipient: NodeIndex,
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Hash)]
@@ -339,7 +361,10 @@ impl MultiKeychainT for KeyBox {
     }
 }
 
-pub fn configure_network(n_members: usize, reliability: f64) -> (UnreliableRouter, Vec<Network>) {
+pub fn configure_network<H, D, S, MS>(
+    n_members: usize,
+    reliability: f64,
+) -> (UnreliableRouter<H, D, S, MS>, Vec<Network<H, D, S, MS>>) {
     let peer_list = || (0..n_members).map(NodeIndex);
 
     let mut router = UnreliableRouter::new(peer_list().collect(), reliability);
@@ -353,12 +378,14 @@ pub fn configure_network(n_members: usize, reliability: f64) -> (UnreliableRoute
 
 pub fn spawn_honest_member_generic<D: aleph_bft::Data, H: Hasher, K: MultiKeychainT>(
     spawner: impl SpawnHandle,
-    config: Config,
+    node_index: NodeIndex,
+    n_members: usize,
     network: impl 'static + NetworkT<H, D, K::Signature, K::PartialMultisignature>,
     data_io: impl DataIOT<D> + Send + 'static,
     mk: &'static K,
 ) -> oneshot::Sender<()> {
     let (exit_tx, exit_rx) = oneshot::channel();
+    let config = gen_config(node_index, n_members.into());
     let spawner_inner = spawner.clone();
     let member_task = async move {
         let member = Member::new(data_io, mk, config, spawner_inner.clone());
