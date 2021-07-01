@@ -1,7 +1,7 @@
 use aleph_bft::Index;
 use aleph_bft::KeyBox as KeyBoxT;
 use aleph_bft::MultiKeychain as MultiKeychainT;
-pub use aleph_mock::NetworkData;
+use aleph_bft::NetworkData;
 
 use aleph_bft::DataIO as DataIOT;
 use aleph_bft::OrderedBatch;
@@ -30,13 +30,13 @@ use std::{
 use async_trait::async_trait;
 use tokio::runtime::{Builder, Runtime};
 
-struct SpyingNetworkHook<W: Write> {
+struct SpyingNetworkHook<W: Write, H, D, S, MS> {
     node: NodeIndex,
-    encoder: NetworkDataEncoding,
+    encoder: NetworkDataEncoding<H, D, S, MS>,
     output: W,
 }
 
-impl<W: Write> SpyingNetworkHook<W> {
+impl<W: Write, H, D, S, MS> SpyingNetworkHook<W, H, D, S, MS> {
     fn new(node: NodeIndex, output: W) -> Self {
         SpyingNetworkHook {
             node,
@@ -46,7 +46,7 @@ impl<W: Write> SpyingNetworkHook<W> {
     }
 }
 
-impl<W: Write + Send> NetworkHook for SpyingNetworkHook<W> {
+impl<W: Write + Send, H, D, S, MS> NetworkHook<H, D, S, MS> for SpyingNetworkHook<W, H, D, S, MS> {
     fn update_state(&mut self, data: &mut NetworkData, _: NodeIndex, recipient: NodeIndex) {
         if self.node == recipient {
             self.encoder.encode_into(data, &mut self.output).unwrap();
@@ -55,28 +55,38 @@ impl<W: Write + Send> NetworkHook for SpyingNetworkHook<W> {
 }
 
 #[derive(Default)]
-pub(crate) struct NetworkDataEncoding {}
+pub(crate) struct NetworkDataEncoding<H, D, S, MS> {}
 
-impl NetworkDataEncoding {
-    pub(crate) fn encode_into<W: Write>(&self, data: &NetworkData, writer: &mut W) -> IOResult<()> {
+impl<
+        H: aleph_bft::Hasher,
+        D: aleph_bft::Data,
+        S: aleph_bft::Signature,
+        MS: aleph_bft::PartialMultisignature,
+    > NetworkDataEncoding<H, D, S, MS>
+{
+    pub(crate) fn encode_into<W: Write>(
+        &self,
+        data: &NetworkData<H, D, S, MS>,
+        writer: &mut W,
+    ) -> IOResult<()> {
         writer.write_all(&data.encode()[..])
     }
 
     pub(crate) fn decode_from<R: Read>(
         &self,
         reader: &mut R,
-    ) -> core::result::Result<NetworkData, codec::Error> {
+    ) -> core::result::Result<NetworkData<H, D, S, MS>, codec::Error> {
         let mut reader = IoReader(reader);
         <NetworkData>::decode(&mut reader)
     }
 }
 
-struct NetworkDataIterator<R> {
+struct NetworkDataIterator<R, H, D, S, MS> {
     input: R,
-    encoding: NetworkDataEncoding,
+    encoding: NetworkDataEncoding<H, D, S, MS>,
 }
 
-impl<R: Read> NetworkDataIterator<R> {
+impl<R: Read, H, D, S, MS> NetworkDataIterator<R, H, D, S, MS> {
     fn new(read: R) -> Self {
         NetworkDataIterator {
             input: read,
@@ -85,8 +95,8 @@ impl<R: Read> NetworkDataIterator<R> {
     }
 }
 
-impl<R: Read> Iterator for NetworkDataIterator<R> {
-    type Item = NetworkData;
+impl<R: Read, H, D, S, MS> Iterator for NetworkDataIterator<R, H, D, S, MS> {
+    type Item = NetworkData<H, D, S, MS>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.encoding.decode_from(&mut self.input) {
@@ -151,12 +161,12 @@ impl<I: Iterator<Item = NetworkData> + Send, C: FnOnce() + Send>
     }
 }
 
-pub struct ReadToNetworkDataIterator<R> {
+pub struct ReadToNetworkDataIterator<R, H, D, S, MS> {
     read: BufReader<R>,
-    decoder: NetworkDataEncoding,
+    decoder: NetworkDataEncoding<H, D, S, MS>,
 }
 
-impl<R: Read> ReadToNetworkDataIterator<R> {
+impl<R: Read, H, D, S, MS> ReadToNetworkDataIterator<R, H, D, S, MS> {
     pub fn new(read: R) -> Self {
         ReadToNetworkDataIterator {
             read: BufReader::new(read),
@@ -165,7 +175,7 @@ impl<R: Read> ReadToNetworkDataIterator<R> {
     }
 }
 
-impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
+impl<R: Read, H, D, S, MS> Iterator for ReadToNetworkDataIterator<R, H, D, S, MS> {
     type Item = NetworkData;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -337,8 +347,10 @@ async fn execute_generate_fuzz<W: Write + Send + 'static>(
     spawner.wait().await;
 }
 
+type FuzzNetworkData = NetworkData<aleph_mock::Hasher64, Data, Signature, PartialMultisignature>;
+
 async fn execute_fuzz(
-    data: impl Iterator<Item = NetworkData> + Send + 'static,
+    data: impl Iterator<Item = FuzzNetworkData> + Send + 'static,
     n_members: usize,
     n_batches: Option<usize>,
 ) {
