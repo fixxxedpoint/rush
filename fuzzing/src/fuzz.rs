@@ -30,13 +30,13 @@ use std::{
 use async_trait::async_trait;
 use tokio::runtime::{Builder, Runtime};
 
-struct SpyingNetworkHook<W: Write, H, D, S, MS> {
+struct SpyingNetworkHook<W: Write> {
     node: NodeIndex,
-    encoder: NetworkDataEncoding<H, D, S, MS>,
+    encoder: NetworkDataEncoding,
     output: W,
 }
 
-impl<W: Write, H, D, S, MS> SpyingNetworkHook<W, H, D, S, MS> {
+impl<W: Write> SpyingNetworkHook<W> {
     fn new(node: NodeIndex, output: W) -> Self {
         SpyingNetworkHook {
             node,
@@ -46,8 +46,10 @@ impl<W: Write, H, D, S, MS> SpyingNetworkHook<W, H, D, S, MS> {
     }
 }
 
-impl<W: Write + Send, H, D, S, MS> NetworkHook<H, D, S, MS> for SpyingNetworkHook<W, H, D, S, MS> {
-    fn update_state(&mut self, data: &mut NetworkData, _: NodeIndex, recipient: NodeIndex) {
+impl<W: Write + Send> NetworkHook<aleph_mock::Hasher64, Data, Signature, PartialMultisignature>
+    for SpyingNetworkHook<W>
+{
+    fn update_state(&mut self, data: &mut FuzzNetworkData, _: NodeIndex, recipient: NodeIndex) {
         if self.node == recipient {
             self.encoder.encode_into(data, &mut self.output).unwrap();
         }
@@ -55,7 +57,7 @@ impl<W: Write + Send, H, D, S, MS> NetworkHook<H, D, S, MS> for SpyingNetworkHoo
 }
 
 #[derive(Default)]
-pub(crate) struct NetworkDataEncoding<H, D, S, MS> {}
+pub(crate) struct NetworkDataEncoding {}
 
 impl<
         H: aleph_bft::Hasher,
@@ -81,12 +83,12 @@ impl<
     }
 }
 
-struct NetworkDataIterator<R, H, D, S, MS> {
+struct NetworkDataIterator<R> {
     input: R,
-    encoding: NetworkDataEncoding<H, D, S, MS>,
+    encoding: NetworkDataEncoding,
 }
 
-impl<R: Read, H, D, S, MS> NetworkDataIterator<R, H, D, S, MS> {
+impl<R: Read> NetworkDataIterator<R, H, D, S, MS> {
     fn new(read: R) -> Self {
         NetworkDataIterator {
             input: read,
@@ -130,21 +132,21 @@ impl<I, C> PlaybackNetwork<I, C> {
 }
 
 #[async_trait::async_trait]
-impl<I: Iterator<Item = NetworkData> + Send, C: FnOnce() + Send>
+impl<I: Iterator<Item = FuzzNetworkData> + Send, C: FnOnce() + Send>
     aleph_bft::Network<aleph_mock::Hasher64, Data, Signature, PartialMultisignature>
     for PlaybackNetwork<I, C>
 {
     type Error = ();
 
-    fn send(&self, _: NetworkData, _: NodeIndex) -> std::result::Result<(), Self::Error> {
+    fn send(&self, _: FuzzNetworkData, _: NodeIndex) -> std::result::Result<(), Self::Error> {
         Ok(())
     }
 
-    fn broadcast(&self, _: NetworkData) -> std::result::Result<(), Self::Error> {
+    fn broadcast(&self, _: FuzzNetworkData) -> std::result::Result<(), Self::Error> {
         Ok(())
     }
 
-    async fn next_event(&mut self) -> Option<NetworkData> {
+    async fn next_event(&mut self) -> Option<FuzzNetworkData> {
         (&mut self.next_delay).await;
         self.next_delay.reset(self.delay);
         match self.data.next() {
@@ -176,7 +178,7 @@ impl<R: Read, H, D, S, MS> ReadToNetworkDataIterator<R, H, D, S, MS> {
 }
 
 impl<R: Read, H, D, S, MS> Iterator for ReadToNetworkDataIterator<R, H, D, S, MS> {
-    type Item = NetworkData;
+    type Item = NetworkData<H, D, S, MS>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Ok(buf) = self.read.fill_buf() {
@@ -439,7 +441,7 @@ pub fn check_fuzz(input: impl Read + Send + 'static, n_members: usize, n_batches
     runtime.block_on(execute_fuzz(data_iter, n_members, n_batches));
 }
 
-pub fn fuzz(data: Vec<NetworkData>, n_members: usize, n_batches: Option<usize>) {
+pub fn fuzz(data: Vec<FuzzNetworkData>, n_members: usize, n_batches: Option<usize>) {
     let runtime = get_runtime();
     runtime.block_on(execute_fuzz(data.into_iter(), n_members, n_batches));
 }
