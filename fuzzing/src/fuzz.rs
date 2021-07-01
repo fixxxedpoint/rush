@@ -59,16 +59,10 @@ impl<W: Write + Send> NetworkHook<aleph_mock::Hasher64, Data, Signature, Partial
 #[derive(Default)]
 pub(crate) struct NetworkDataEncoding {}
 
-impl<
-        H: aleph_bft::Hasher,
-        D: aleph_bft::Data,
-        S: aleph_bft::Signature,
-        MS: aleph_bft::PartialMultisignature,
-    > NetworkDataEncoding<H, D, S, MS>
-{
+impl NetworkDataEncoding {
     pub(crate) fn encode_into<W: Write>(
         &self,
-        data: &NetworkData<H, D, S, MS>,
+        data: &FuzzNetworkData,
         writer: &mut W,
     ) -> IOResult<()> {
         writer.write_all(&data.encode()[..])
@@ -77,9 +71,9 @@ impl<
     pub(crate) fn decode_from<R: Read>(
         &self,
         reader: &mut R,
-    ) -> core::result::Result<NetworkData<H, D, S, MS>, codec::Error> {
+    ) -> core::result::Result<FuzzNetworkData, codec::Error> {
         let mut reader = IoReader(reader);
-        <NetworkData>::decode(&mut reader)
+        <FuzzNetworkData>::decode(&mut reader)
     }
 }
 
@@ -88,7 +82,7 @@ struct NetworkDataIterator<R> {
     encoding: NetworkDataEncoding,
 }
 
-impl<R: Read> NetworkDataIterator<R, H, D, S, MS> {
+impl<R: Read> NetworkDataIterator<R> {
     fn new(read: R) -> Self {
         NetworkDataIterator {
             input: read,
@@ -97,8 +91,8 @@ impl<R: Read> NetworkDataIterator<R, H, D, S, MS> {
     }
 }
 
-impl<R: Read, H, D, S, MS> Iterator for NetworkDataIterator<R, H, D, S, MS> {
-    type Item = NetworkData<H, D, S, MS>;
+impl<R: Read> Iterator for NetworkDataIterator<R> {
+    type Item = FuzzNetworkData;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.encoding.decode_from(&mut self.input) {
@@ -163,12 +157,12 @@ impl<I: Iterator<Item = FuzzNetworkData> + Send, C: FnOnce() + Send>
     }
 }
 
-pub struct ReadToNetworkDataIterator<R, H, D, S, MS> {
+pub struct ReadToNetworkDataIterator<R> {
     read: BufReader<R>,
-    decoder: NetworkDataEncoding<H, D, S, MS>,
+    decoder: NetworkDataEncoding,
 }
 
-impl<R: Read, H, D, S, MS> ReadToNetworkDataIterator<R, H, D, S, MS> {
+impl<R: Read> ReadToNetworkDataIterator<R> {
     pub fn new(read: R) -> Self {
         ReadToNetworkDataIterator {
             read: BufReader::new(read),
@@ -177,8 +171,8 @@ impl<R: Read, H, D, S, MS> ReadToNetworkDataIterator<R, H, D, S, MS> {
     }
 }
 
-impl<R: Read, H, D, S, MS> Iterator for ReadToNetworkDataIterator<R, H, D, S, MS> {
-    type Item = NetworkData<H, D, S, MS>;
+impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
+    type Item = FuzzNetworkData;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Ok(buf) = self.read.fill_buf() {
@@ -190,7 +184,7 @@ impl<R: Read, H, D, S, MS> Iterator for ReadToNetworkDataIterator<R, H, D, S, MS
             Ok(v) => Some(v),
             // otherwise try to read until you reach END-OF-FILE
             Err(e) => {
-                error!(target: "fuzz_target_1", "Unable to parse NetworkData: {:?}.", e);
+                error!(target: "fuzz", "Unable to parse NetworkData: {:?}.", e);
                 self.next()
             }
         }
@@ -306,7 +300,7 @@ impl MultiKeychainT for KeyBox {
     }
 }
 
-async fn execute_generate_fuzz<W: Write + Send + 'static>(
+async fn execute_generate_fuzz<'a, W: Write + Send + 'static>(
     output: W,
     n_members: usize,
     n_batches: usize,
@@ -326,7 +320,7 @@ async fn execute_generate_fuzz<W: Write + Send + 'static>(
     for network in networks.into_iter().take(threshold) {
         let (data_io, batch_rx) = DataIO::new();
         let keybox = KeyBox::new(NodeCount(n_members), network.index());
-        let exit_tx = aleph_mock::spawn_honest_member_generic(
+        let exit_tx = spawn_honest_member_generic(
             spawner.clone(),
             network.index(),
             n_members,
@@ -369,8 +363,8 @@ async fn execute_fuzz(
 
     let spawner = Spawner::new();
     let node_index = NodeIndex(0);
-    let (data_io, mut batch_rx) = DataIO::new(node_index);
-    let keybox = KeyBox::new(n_members, node_index);
+    let (data_io, mut batch_rx) = DataIO::new();
+    let keybox = KeyBox::new(NodeCount(n_members), node_index);
     let exit_tx = spawn_honest_member_generic(
         spawner.clone(),
         NodeIndex(0),

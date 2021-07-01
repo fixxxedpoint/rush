@@ -421,13 +421,14 @@ pub fn spawn_honest_member_generic<D: aleph_bft::Data, H: Hasher, K: MultiKeycha
     n_members: usize,
     network: impl 'static + NetworkT<H, D, K::Signature, K::PartialMultisignature>,
     data_io: impl DataIOT<D> + Send + 'static,
-    mk: &'static K,
+    mk: impl ToOwned<Owned = K>,
 ) -> oneshot::Sender<()> {
     let (exit_tx, exit_rx) = oneshot::channel();
     let config = gen_config(node_index, n_members.into());
     let spawner_inner = spawner.clone();
+    let keybox = mk.to_owned();
     let member_task = async move {
-        let member = Member::new(data_io, mk, config, spawner_inner.clone());
+        let member = Member::new(data_io, &keybox, config, spawner_inner.clone());
         member.run_session(network, exit_rx).await;
     };
     spawner.spawn("member", member_task);
