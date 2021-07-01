@@ -80,9 +80,9 @@ impl Default for Spawner {
     }
 }
 
-pub type NetworkData = aleph_bft::NetworkData<Hasher64, Data, Signature, PartialMultisignature>;
-type NetworkReceiver = UnboundedReceiver<(NetworkData, NodeIndex)>;
-type NetworkSender = UnboundedSender<(NetworkData, NodeIndex)>;
+type NetworkReceiver<H, D, S, MS> =
+    UnboundedReceiver<(aleph_bft::NetworkData<H, D, S, MS>, NodeIndex)>;
+type NetworkSender<H, D, S, MS> = UnboundedSender<(aleph_bft::NetworkData<H, D, S, MS>, NodeIndex)>;
 
 pub struct Network<
     H: aleph_bft::Hasher,
@@ -96,7 +96,13 @@ pub struct Network<
     index: NodeIndex,
 }
 
-impl<H, D, S, MS> Network<H, D, S, MS> {
+impl<
+        H: aleph_bft::Hasher,
+        D: aleph_bft::Data,
+        S: aleph_bft::Signature,
+        MS: aleph_bft::PartialMultisignature,
+    > Network<H, D, S, MS>
+{
     pub fn index(&self) -> NodeIndex {
         self.index
     }
@@ -134,19 +140,35 @@ impl<
     }
 }
 
-struct Peer {
-    tx: NetworkSender,
-    rx: NetworkReceiver,
+struct Peer<
+    H: aleph_bft::Hasher,
+    D: aleph_bft::Data,
+    S: aleph_bft::Signature,
+    MS: aleph_bft::PartialMultisignature,
+> {
+    tx: NetworkSender<H, D, S, MS>,
+    rx: NetworkReceiver<H, D, S, MS>,
 }
 
-pub struct UnreliableRouter<H, D, S, MS> {
-    peers: RefCell<HashMap<NodeIndex, Peer>>,
+pub struct UnreliableRouter<
+    H: aleph_bft::Hasher,
+    D: aleph_bft::Data,
+    S: aleph_bft::Signature,
+    MS: aleph_bft::PartialMultisignature,
+> {
+    peers: RefCell<HashMap<NodeIndex, Peer<H, D, S, MS>>>,
     peer_list: Vec<NodeIndex>,
     hook_list: RefCell<Vec<Box<dyn NetworkHook<H, D, S, MS>>>>,
     reliability: f64, //a number in the range [0, 1], 1.0 means perfect reliability, 0.0 means no message gets through
 }
 
-impl<H, D, S, MS> UnreliableRouter<H, D, S, MS> {
+impl<
+        H: aleph_bft::Hasher,
+        D: aleph_bft::Data,
+        S: aleph_bft::Signature,
+        MS: aleph_bft::PartialMultisignature,
+    > UnreliableRouter<H, D, S, MS>
+{
     pub fn new(peer_list: Vec<NodeIndex>, reliability: f64) -> Self {
         UnreliableRouter {
             peers: RefCell::new(HashMap::new()),
@@ -185,7 +207,13 @@ impl<H, D, S, MS> UnreliableRouter<H, D, S, MS> {
     }
 }
 
-impl<H, D, S, MS> Future for UnreliableRouter<H, D, S, MS> {
+impl<
+        H: aleph_bft::Hasher,
+        D: aleph_bft::Data,
+        S: aleph_bft::Signature,
+        MS: aleph_bft::PartialMultisignature,
+    > Future for UnreliableRouter<H, D, S, MS>
+{
     type Output = ();
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut self;
@@ -235,7 +263,13 @@ impl<H, D, S, MS> Future for UnreliableRouter<H, D, S, MS> {
     }
 }
 
-pub trait NetworkHook<H, D, S, MS>: Send {
+pub trait NetworkHook<
+    H: aleph_bft::Hasher,
+    D: aleph_bft::Data,
+    S: aleph_bft::Signature,
+    MS: aleph_bft::PartialMultisignature,
+>: Send
+{
     fn update_state(
         &mut self,
         data: &mut aleph_bft::NetworkData<H, D, S, MS>,
@@ -361,7 +395,12 @@ impl MultiKeychainT for KeyBox {
     }
 }
 
-pub fn configure_network<H, D, S, MS>(
+pub fn configure_network<
+    H: aleph_bft::Hasher,
+    D: aleph_bft::Data,
+    S: aleph_bft::Signature,
+    MS: aleph_bft::PartialMultisignature,
+>(
     n_members: usize,
     reliability: f64,
 ) -> (UnreliableRouter<H, D, S, MS>, Vec<Network<H, D, S, MS>>) {
