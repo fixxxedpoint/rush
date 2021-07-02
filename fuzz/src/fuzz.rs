@@ -348,7 +348,8 @@ async fn execute_generate_fuzz<'a, W: Write + Send + 'static>(
     spawner.wait().await;
 }
 
-type FuzzNetworkData = NetworkData<aleph_mock::Hasher64, Data, Signature, PartialMultisignature>;
+pub type FuzzNetworkData =
+    NetworkData<aleph_mock::Hasher64, Data, Signature, PartialMultisignature>;
 
 async fn execute_fuzz(
     data: impl Iterator<Item = FuzzNetworkData> + Send + 'static,
@@ -399,8 +400,6 @@ async fn execute_fuzz(
             _ = playback_finished_rx => {
                 if !batches_expected {
                     spawner.wait_idle().await;
-                    // // let it process all received data
-                    // Delay::new(Duration::from_secs(1)).await;
                     break;
                 }
             }
