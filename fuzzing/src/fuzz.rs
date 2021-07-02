@@ -1,15 +1,19 @@
+use aleph_bft::DataIO as DataIOT;
 use aleph_bft::Index;
 use aleph_bft::KeyBox as KeyBoxT;
 use aleph_bft::MultiKeychain as MultiKeychainT;
 use aleph_bft::NetworkData;
-
-use aleph_bft::DataIO as DataIOT;
 use aleph_bft::OrderedBatch;
 use aleph_bft::PartialMultisignature as PartialMultisignatureT;
+// use aleph_mock::Spawner;
+use futures::task::Poll;
+use parking_lot::Mutex;
 use std::pin::Pin;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use aleph_bft::{NodeCount, NodeIndex, SpawnHandle};
-use aleph_mock::{configure_network, init_log, spawn_honest_member_generic, NetworkHook, Spawner};
+use aleph_mock::{configure_network, init_log, spawn_honest_member_generic, NetworkHook};
 
 use codec::{Decode, Encode, IoReader};
 
@@ -29,6 +33,7 @@ use std::{
 
 use async_trait::async_trait;
 use tokio::runtime::{Builder, Runtime};
+use tokio::task::yield_now;
 
 struct SpyingNetworkHook<W: Write> {
     node: NodeIndex,
@@ -393,8 +398,9 @@ async fn execute_fuzz(
             }
             _ = playback_finished_rx => {
                 if !batches_expected {
-                    // let it process all received data
-                    Delay::new(Duration::from_secs(1)).await;
+                    spawner.wait_idle().await;
+                    // // let it process all received data
+                    // Delay::new(Duration::from_secs(1)).await;
                     break;
                 }
             }
@@ -438,4 +444,91 @@ pub fn check_fuzz(input: impl Read + Send + 'static, n_members: usize, n_batches
 pub fn fuzz(data: Vec<FuzzNetworkData>, n_members: usize, n_batches: Option<usize>) {
     let runtime = get_runtime();
     runtime.block_on(execute_fuzz(data.into_iter(), n_members, n_batches));
+}
+
+#[derive(Clone)]
+struct Spawner {
+    handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    task_counter: Arc<AtomicU64>,
+}
+
+struct SpawnFuture<T> {
+    task: Pin<Box<T>>,
+    counter: Arc<AtomicU64>,
+}
+
+// impl<T: Future<Output = ()> + Send + 'static> AsMut<T> for SpawnFuture<T> {
+//     fn as_mut(&mut self) -> &mut T {
+//         &mut self.task
+//     }
+// }
+
+impl<T> SpawnFuture<T> {
+    fn new(task: T, counter: Arc<AtomicU64>) -> Self {
+        SpawnFuture {
+            task: Box::pin(task),
+            counter,
+        }
+    }
+}
+
+// impl<T: Future<Output = ()> + Send + 'static> Deref for SpawnFuture<T> {
+//     type Target = T;
+
+//     fn deref(&self) -> &Self::Target {
+//         &self.task
+//     }
+// }
+
+// impl<T: Future<Output = ()> + Send + 'static> DerefMut for SpawnFuture<T> {
+//     fn deref_mut(&mut self) -> &mut Self::Target {
+//         &mut self.task
+//     }
+// }
+
+impl<T: Future<Output = ()> + Send + 'static> Future for SpawnFuture<T> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        self.counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let result = Future::poll(self.task.as_mut(), cx);
+        self.counter
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        result
+    }
+}
+
+impl SpawnHandle for Spawner {
+    fn spawn(&self, _name: &str, task: impl Future<Output = ()> + Send + 'static) {
+        let wrapped = SpawnFuture::new(task, self.task_counter.clone());
+        self.handles.lock().push(tokio::spawn(wrapped))
+    }
+}
+
+impl Spawner {
+    pub async fn wait(&self) {
+        for h in self.handles.lock().iter_mut() {
+            let _ = h.await;
+        }
+    }
+
+    pub fn new() -> Self {
+        Spawner {
+            handles: Arc::new(Mutex::new(Vec::new())),
+            task_counter: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub async fn wait_idle(&self) {
+        while self.task_counter.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            yield_now().await;
+        }
+    }
+}
+
+impl Default for Spawner {
+    fn default() -> Self {
+        Spawner::new()
+    }
 }

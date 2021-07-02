@@ -34,7 +34,7 @@ tokio = { version = "1.6.1", features = ["macros", "rt", "rt-multi-thread"] }
 libp2p = { version ="0.38", features = ["mdns", "tcp-tokio"]}
 parking_lot = "0.11"
 env_logger = "0.8"
-aleph_mock = { path = "./src/testing/mock" }
+aleph-mock = { path = "./src/testing/mock" }
 
 [features]
 # fuzzing = ["env_logger", "codec/std", "tokio/rt"]
