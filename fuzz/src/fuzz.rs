@@ -425,7 +425,7 @@ async fn execute_fuzz(
 }
 
 fn get_runtime() -> Runtime {
-    Builder::new_current_thread().enable_all().build().unwrap()
+    Builder::new_multi_thread().enable_all().build().unwrap()
 }
 
 pub fn generate_fuzz<W: Write + Send + 'static>(output: W, n_members: usize, n_batches: usize) {
