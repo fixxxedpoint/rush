@@ -551,8 +551,7 @@ impl AlertHook {
 
 impl NetworkHook for AlertHook {
     fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex) {
-        use crate::alerts::AlertMessage::*;
-        use crate::network::NetworkDataInner::*;
+        use crate::{alerts::AlertMessage::*, network::NetworkDataInner::*};
         if let crate::NetworkData(Alert(ForkAlert(_))) = data {
             *self
                 .alerts_sent_by_connection

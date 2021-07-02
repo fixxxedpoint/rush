@@ -1,16 +1,13 @@
-use aleph_bft::DataIO as DataIOT;
-use aleph_bft::Index;
-use aleph_bft::KeyBox as KeyBoxT;
-use aleph_bft::MultiKeychain as MultiKeychainT;
-use aleph_bft::NetworkData;
-use aleph_bft::OrderedBatch;
-use aleph_bft::PartialMultisignature as PartialMultisignatureT;
-// use aleph_mock::Spawner;
+use aleph_bft::{
+    DataIO as DataIOT, Index, KeyBox as KeyBoxT, MultiKeychain as MultiKeychainT, NetworkData,
+    OrderedBatch, PartialMultisignature as PartialMultisignatureT,
+};
 use futures::task::Poll;
 use parking_lot::Mutex;
-use std::pin::Pin;
-use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
+use std::{
+    pin::Pin,
+    sync::{atomic::AtomicU64, Arc},
+};
 
 use aleph_bft::{NodeCount, NodeIndex, SpawnHandle};
 use aleph_mock::{configure_network, init_log, spawn_honest_member_generic, NetworkHook};
@@ -18,8 +15,11 @@ use aleph_mock::{configure_network, init_log, spawn_honest_member_generic, Netwo
 use codec::{Decode, Encode, IoReader};
 
 use futures::{
-    channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
-    channel::oneshot::{self, Receiver},
+    channel::{
+        mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
+        oneshot::{self, Receiver},
+    },
+    task::Context,
     Future, StreamExt,
 };
 
@@ -32,8 +32,122 @@ use std::{
 };
 
 use async_trait::async_trait;
-use tokio::runtime::{Builder, Runtime};
-use tokio::task::yield_now;
+use tokio::{
+    runtime::{Builder, Runtime},
+    task::yield_now,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Hash)]
+pub struct Data {}
+
+impl Data {
+    fn new() -> Self {
+        Data {}
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct Signature {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct PartialMultisignature {
+    signed_by: Vec<NodeIndex>,
+}
+
+impl PartialMultisignatureT for PartialMultisignature {
+    type Signature = Signature;
+    fn add_signature(self, _: &Self::Signature, index: NodeIndex) -> Self {
+        let Self { mut signed_by } = self;
+        for id in &signed_by {
+            if *id == index {
+                return Self { signed_by };
+            }
+        }
+        signed_by.push(index);
+        Self { signed_by }
+    }
+}
+
+pub struct DataIO {
+    tx: UnboundedSender<OrderedBatch<Data>>,
+}
+
+impl DataIOT<self::Data> for DataIO {
+    type Error = ();
+    fn get_data(&self) -> Data {
+        Data::new()
+    }
+
+    fn check_availability(
+        &self,
+        _: &Data,
+    ) -> Option<Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send>>> {
+        None
+    }
+
+    fn send_ordered_batch(&mut self, data: OrderedBatch<Data>) -> Result<(), ()> {
+        self.tx.unbounded_send(data).map_err(|e| {
+            error!(target: "data-io", "Error when sending data from DataIO {:?}.", e);
+        })
+    }
+}
+
+impl DataIO {
+    pub fn new() -> (Self, UnboundedReceiver<OrderedBatch<Data>>) {
+        let (tx, rx) = unbounded();
+        let data_io = DataIO { tx };
+        (data_io, rx)
+    }
+}
+
+#[derive(Clone)]
+pub struct KeyBox {
+    count: NodeCount,
+    ix: NodeIndex,
+}
+
+impl KeyBox {
+    pub fn new(count: NodeCount, ix: NodeIndex) -> Self {
+        KeyBox { count, ix }
+    }
+}
+
+impl Index for KeyBox {
+    fn index(&self) -> NodeIndex {
+        self.ix
+    }
+}
+
+#[async_trait]
+impl KeyBoxT for KeyBox {
+    type Signature = Signature;
+
+    fn node_count(&self) -> NodeCount {
+        self.count
+    }
+
+    async fn sign(&self, _msg: &[u8]) -> Signature {
+        Signature {}
+    }
+
+    fn verify(&self, _msg: &[u8], _sgn: &Signature, _index: NodeIndex) -> bool {
+        true
+    }
+}
+
+impl MultiKeychainT for KeyBox {
+    type PartialMultisignature = PartialMultisignature;
+    fn from_signature(&self, _: &Self::Signature, index: NodeIndex) -> Self::PartialMultisignature {
+        let signed_by = vec![index];
+        PartialMultisignature { signed_by }
+    }
+    fn is_complete(&self, _: &[u8], partial: &Self::PartialMultisignature) -> bool {
+        (self.count * 2) / 3 < NodeCount(partial.signed_by.len())
+    }
+}
+
+pub type FuzzNetworkData =
+    NetworkData<aleph_mock::Hasher64, Data, Signature, PartialMultisignature>;
 
 struct SpyingNetworkHook<W: Write> {
     node: NodeIndex,
@@ -196,112 +310,71 @@ impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Hash)]
-pub struct Data {}
-
-impl Data {
-    fn new() -> Self {
-        Data {}
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
-pub struct Signature {}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
-pub struct PartialMultisignature {
-    signed_by: Vec<NodeIndex>,
-}
-
-impl PartialMultisignatureT for PartialMultisignature {
-    type Signature = Signature;
-    fn add_signature(self, _: &Self::Signature, index: NodeIndex) -> Self {
-        let Self { mut signed_by } = self;
-        for id in &signed_by {
-            if *id == index {
-                return Self { signed_by };
-            }
-        }
-        signed_by.push(index);
-        Self { signed_by }
-    }
-}
-
-pub struct DataIO {
-    tx: UnboundedSender<OrderedBatch<Data>>,
-}
-
-impl DataIOT<self::Data> for DataIO {
-    type Error = ();
-    fn get_data(&self) -> Data {
-        Data::new()
-    }
-
-    fn check_availability(
-        &self,
-        _: &Data,
-    ) -> Option<Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send>>> {
-        None
-    }
-
-    fn send_ordered_batch(&mut self, data: OrderedBatch<Data>) -> Result<(), ()> {
-        self.tx.unbounded_send(data).map_err(|e| {
-            error!(target: "data-io", "Error when sending data from DataIO {:?}.", e);
-        })
-    }
-}
-
-impl DataIO {
-    pub fn new() -> (Self, UnboundedReceiver<OrderedBatch<Data>>) {
-        let (tx, rx) = unbounded();
-        let data_io = DataIO { tx };
-        (data_io, rx)
-    }
-}
-
 #[derive(Clone)]
-pub struct KeyBox {
-    count: NodeCount,
-    ix: NodeIndex,
+struct Spawner {
+    handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    task_counter: Arc<AtomicU64>,
 }
 
-impl KeyBox {
-    pub fn new(count: NodeCount, ix: NodeIndex) -> Self {
-        KeyBox { count, ix }
-    }
+struct SpawnFuture<T> {
+    task: Pin<Box<T>>,
+    counter: Arc<AtomicU64>,
 }
 
-impl Index for KeyBox {
-    fn index(&self) -> NodeIndex {
-        self.ix
-    }
-}
-
-#[async_trait]
-impl KeyBoxT for KeyBox {
-    type Signature = Signature;
-
-    fn node_count(&self) -> NodeCount {
-        self.count
-    }
-
-    async fn sign(&self, _msg: &[u8]) -> Signature {
-        Signature {}
-    }
-
-    fn verify(&self, _msg: &[u8], _sgn: &Signature, _index: NodeIndex) -> bool {
-        true
+impl<T> SpawnFuture<T> {
+    fn new(task: T, counter: Arc<AtomicU64>) -> Self {
+        SpawnFuture {
+            task: Box::pin(task),
+            counter,
+        }
     }
 }
 
-impl MultiKeychainT for KeyBox {
-    type PartialMultisignature = PartialMultisignature;
-    fn from_signature(&self, _: &Self::Signature, index: NodeIndex) -> Self::PartialMultisignature {
-        let signed_by = vec![index];
-        PartialMultisignature { signed_by }
+impl<T: Future<Output = ()> + Send + 'static> Future for SpawnFuture<T> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let result = Future::poll(self.task.as_mut(), cx);
+        self.counter
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        result
     }
-    fn is_complete(&self, _: &[u8], partial: &Self::PartialMultisignature) -> bool {
-        (self.count * 2) / 3 < NodeCount(partial.signed_by.len())
+}
+
+impl SpawnHandle for Spawner {
+    fn spawn(&self, _name: &str, task: impl Future<Output = ()> + Send + 'static) {
+        let wrapped = SpawnFuture::new(task, self.task_counter.clone());
+        self.handles.lock().push(tokio::spawn(wrapped))
+    }
+}
+
+impl Spawner {
+    pub async fn wait(&self) {
+        for h in self.handles.lock().iter_mut() {
+            let _ = h.await;
+        }
+    }
+
+    pub fn new() -> Self {
+        Spawner {
+            handles: Arc::new(Mutex::new(Vec::new())),
+            task_counter: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub async fn wait_idle(&self) {
+        while self.task_counter.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            println!("boom");
+            yield_now().await;
+        }
+    }
+}
+
+impl Default for Spawner {
+    fn default() -> Self {
+        Spawner::new()
     }
 }
 
@@ -347,9 +420,6 @@ async fn execute_generate_fuzz<'a, W: Write + Send + 'static>(
     }
     spawner.wait().await;
 }
-
-pub type FuzzNetworkData =
-    NetworkData<aleph_mock::Hasher64, Data, Signature, PartialMultisignature>;
 
 async fn execute_fuzz(
     data: impl Iterator<Item = FuzzNetworkData> + Send + 'static,
@@ -443,91 +513,4 @@ pub fn check_fuzz(input: impl Read + Send + 'static, n_members: usize, n_batches
 pub fn fuzz(data: Vec<FuzzNetworkData>, n_members: usize, n_batches: Option<usize>) {
     let runtime = get_runtime();
     runtime.block_on(execute_fuzz(data.into_iter(), n_members, n_batches));
-}
-
-#[derive(Clone)]
-struct Spawner {
-    handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
-    task_counter: Arc<AtomicU64>,
-}
-
-struct SpawnFuture<T> {
-    task: Pin<Box<T>>,
-    counter: Arc<AtomicU64>,
-}
-
-// impl<T: Future<Output = ()> + Send + 'static> AsMut<T> for SpawnFuture<T> {
-//     fn as_mut(&mut self) -> &mut T {
-//         &mut self.task
-//     }
-// }
-
-impl<T> SpawnFuture<T> {
-    fn new(task: T, counter: Arc<AtomicU64>) -> Self {
-        SpawnFuture {
-            task: Box::pin(task),
-            counter,
-        }
-    }
-}
-
-// impl<T: Future<Output = ()> + Send + 'static> Deref for SpawnFuture<T> {
-//     type Target = T;
-
-//     fn deref(&self) -> &Self::Target {
-//         &self.task
-//     }
-// }
-
-// impl<T: Future<Output = ()> + Send + 'static> DerefMut for SpawnFuture<T> {
-//     fn deref_mut(&mut self) -> &mut Self::Target {
-//         &mut self.task
-//     }
-// }
-
-impl<T: Future<Output = ()> + Send + 'static> Future for SpawnFuture<T> {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        self.counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let result = Future::poll(self.task.as_mut(), cx);
-        self.counter
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        result
-    }
-}
-
-impl SpawnHandle for Spawner {
-    fn spawn(&self, _name: &str, task: impl Future<Output = ()> + Send + 'static) {
-        let wrapped = SpawnFuture::new(task, self.task_counter.clone());
-        self.handles.lock().push(tokio::spawn(wrapped))
-    }
-}
-
-impl Spawner {
-    pub async fn wait(&self) {
-        for h in self.handles.lock().iter_mut() {
-            let _ = h.await;
-        }
-    }
-
-    pub fn new() -> Self {
-        Spawner {
-            handles: Arc::new(Mutex::new(Vec::new())),
-            task_counter: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
-    pub async fn wait_idle(&self) {
-        while self.task_counter.load(std::sync::atomic::Ordering::Relaxed) > 0 {
-            yield_now().await;
-        }
-    }
-}
-
-impl Default for Spawner {
-    fn default() -> Self {
-        Spawner::new()
-    }
 }

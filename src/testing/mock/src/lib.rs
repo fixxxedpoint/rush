@@ -4,8 +4,10 @@ use log::{debug, error};
 use parking_lot::Mutex;
 
 use futures::{
-    channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
-    channel::oneshot,
+    channel::{
+        mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
+        oneshot,
+    },
     Future, StreamExt,
 };
 
