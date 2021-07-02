@@ -4,7 +4,8 @@ use crate::{
     member::UnitMessage,
     network::NetworkDataInner,
     testing::mock::{
-        configure_network, init_log, spawn_honest_member, NetworkData, NetworkHook, Spawner,
+        configure_network, init_log, spawn_honest_member, Data, Hasher64, NetworkData, NetworkHook,
+        PartialMultisignature, Signature, Spawner,
     },
     Index, NodeCount, NodeIndex, Round, SpawnHandle,
 };
@@ -18,7 +19,7 @@ struct CorruptPacket {
     round: Round,
 }
 
-impl NetworkHook for CorruptPacket {
+impl NetworkHook<Hasher64, Data, Signature, PartialMultisignature> for CorruptPacket {
     fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex) {
         if self.recipient != recipient || self.sender != sender {
             return;
@@ -39,7 +40,7 @@ struct NoteRequest {
     requested: Arc<Mutex<bool>>,
 }
 
-impl NetworkHook for NoteRequest {
+impl NetworkHook<Hasher64, Data, Signature, PartialMultisignature> for NoteRequest {
     fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, _: NodeIndex) {
         use NetworkDataInner::Units;
         use UnitMessage::RequestCoord;
