@@ -6,7 +6,7 @@ use futures::task::Poll;
 use parking_lot::Mutex;
 use std::{
     pin::Pin,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{atomic::AtomicBool, atomic::AtomicU64, Arc},
 };
 
 use aleph_bft::{NodeCount, NodeIndex, SpawnHandle};
@@ -314,18 +314,22 @@ impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
 struct Spawner {
     handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     task_counter: Arc<AtomicU64>,
+    idle_mx: Arc<Mutex<()>>,
+    wake_flag: Arc<AtomicBool>,
 }
 
 struct SpawnFuture<T> {
     task: Pin<Box<T>>,
     counter: Arc<AtomicU64>,
+    wake_flag: Arc<AtomicBool>,
 }
 
 impl<T> SpawnFuture<T> {
-    fn new(task: T, counter: Arc<AtomicU64>) -> Self {
+    fn new(task: T, counter: Arc<AtomicU64>, wake_flag: Arc<AtomicBool>) -> Self {
         SpawnFuture {
             task: Box::pin(task),
             counter,
+            wake_flag,
         }
     }
 }
@@ -339,13 +343,15 @@ impl<T: Future<Output = ()> + Send + 'static> Future for SpawnFuture<T> {
         let result = Future::poll(self.task.as_mut(), cx);
         self.counter
             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.wake_flag
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         result
     }
 }
 
 impl SpawnHandle for Spawner {
     fn spawn(&self, _name: &str, task: impl Future<Output = ()> + Send + 'static) {
-        let wrapped = SpawnFuture::new(task, self.task_counter.clone());
+        let wrapped = SpawnFuture::new(task, self.task_counter.clone(), self.wake_flag.clone());
         self.handles.lock().push(tokio::spawn(wrapped))
     }
 }
@@ -361,12 +367,21 @@ impl Spawner {
         Spawner {
             handles: Arc::new(Mutex::new(Vec::new())),
             task_counter: Arc::new(AtomicU64::new(0)),
+            idle_mx: Arc::new(Mutex::new(())),
+            wake_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub async fn wait_idle(&self) {
-        while self.task_counter.load(std::sync::atomic::Ordering::Relaxed) > 0 {
-            println!("boom");
+        let _ = self.idle_mx.lock();
+        // try to verify if any other task was woke up
+        self.wake_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        while (self.task_counter.load(std::sync::atomic::Ordering::Relaxed) > 0
+            || self.wake_flag.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            self.wake_flag
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             yield_now().await;
         }
     }
@@ -495,7 +510,7 @@ async fn execute_fuzz(
 }
 
 fn get_runtime() -> Runtime {
-    Builder::new_multi_thread().enable_all().build().unwrap()
+    Builder::new_current_thread().enable_all().build().unwrap()
 }
 
 pub fn generate_fuzz<W: Write + Send + 'static>(output: W, n_members: usize, n_batches: usize) {
