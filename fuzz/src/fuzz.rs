@@ -377,8 +377,8 @@ impl Spawner {
         // try to verify if any other task was woke up
         self.wake_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        while (self.task_counter.load(std::sync::atomic::Ordering::Relaxed) > 0
-            || self.wake_flag.load(std::sync::atomic::Ordering::Relaxed))
+        while self.task_counter.load(std::sync::atomic::Ordering::Relaxed) > 0
+            || self.wake_flag.load(std::sync::atomic::Ordering::Relaxed)
         {
             self.wake_flag
                 .store(true, std::sync::atomic::Ordering::Relaxed);
