@@ -64,13 +64,15 @@ impl SpawnHandle for Spawner {
 
     fn spawn_essential(
         &self,
-        _: &str,
+        name: &'static str,
         task: impl Future<Output = ()> + Send + 'static,
     ) -> TaskHandle {
         let (res_tx, res_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             task.await;
-            res_tx.send(()).expect("We own the rx.");
+            res_tx
+                .send(())
+                .expect(&("We own the rx - task's name: ".to_owned() + name));
         });
         self.handles.lock().push(task);
         Box::pin(async move { res_rx.await.map_err(|_| ()) })
