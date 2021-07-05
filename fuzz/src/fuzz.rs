@@ -313,22 +313,19 @@ impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
 #[derive(Clone)]
 struct Spawner {
     handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
-    task_counter: Arc<AtomicU64>,
     idle_mx: Arc<Mutex<()>>,
     wake_flag: Arc<AtomicBool>,
 }
 
 struct SpawnFuture<T> {
     task: Pin<Box<T>>,
-    counter: Arc<AtomicU64>,
     wake_flag: Arc<AtomicBool>,
 }
 
 impl<T> SpawnFuture<T> {
-    fn new(task: T, counter: Arc<AtomicU64>, wake_flag: Arc<AtomicBool>) -> Self {
+    fn new(task: T, wake_flag: Arc<AtomicBool>) -> Self {
         SpawnFuture {
             task: Box::pin(task),
-            counter,
             wake_flag,
         }
     }
@@ -338,20 +335,16 @@ impl<T: Future<Output = ()> + Send + 'static> Future for SpawnFuture<T> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let result = Future::poll(self.task.as_mut(), cx);
-        self.counter
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         self.wake_flag
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        let result = Future::poll(self.task.as_mut(), cx);
         result
     }
 }
 
 impl SpawnHandle for Spawner {
     fn spawn(&self, _name: &str, task: impl Future<Output = ()> + Send + 'static) {
-        let wrapped = SpawnFuture::new(task, self.task_counter.clone(), self.wake_flag.clone());
+        let wrapped = SpawnFuture::new(task, self.wake_flag.clone());
         self.handles.lock().push(tokio::spawn(wrapped))
     }
 }
@@ -366,7 +359,6 @@ impl Spawner {
     pub fn new() -> Self {
         Spawner {
             handles: Arc::new(Mutex::new(Vec::new())),
-            task_counter: Arc::new(AtomicU64::new(0)),
             idle_mx: Arc::new(Mutex::new(())),
             wake_flag: Arc::new(AtomicBool::new(false)),
         }
@@ -374,15 +366,19 @@ impl Spawner {
 
     pub async fn wait_idle(&self) {
         let _ = self.idle_mx.lock();
-        // try to verify if any other task was woke up
+        // try to verify if any other task was attempting to wake up
+        // it assumes that we are using a single-threaded runtime for scheduling our Futures
         self.wake_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        while self.task_counter.load(std::sync::atomic::Ordering::Relaxed) > 0
-            || self.wake_flag.load(std::sync::atomic::Ordering::Relaxed)
-        {
-            self.wake_flag
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        loop {
             yield_now().await;
+            if !self
+                .wake_flag
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                break;
+            }
         }
     }
 }
