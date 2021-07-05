@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use crate::{
     member::{NotificationIn, NotificationOut},
     units::{Unit, UnitCoord},
-    NodeCount, NodeIndex, OrderedBatch,
+    Hasher, NodeCount, NodeIndex, OrderedBatch,
 };
 
 use std::{
@@ -105,7 +105,7 @@ impl DataIO {
 }
 
 #[derive(Clone)]
-pub struct KeyBox {
+pub(crate) struct KeyBox {
     count: NodeCount,
     ix: NodeIndex,
 }
@@ -153,9 +153,9 @@ impl crate::MultiKeychain for KeyBox {
 // A hasher from the standard library that hashes to u64, should be enough to
 // avoid collisions in testing.
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
-pub struct Hasher64;
+pub(crate) struct Hasher64;
 
-impl crate::Hasher for Hasher64 {
+impl Hasher for Hasher64 {
     type Hash = [u8; 8];
 
     fn hash(x: &[u8]) -> Self::Hash {
