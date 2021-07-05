@@ -368,6 +368,43 @@ pub trait NetworkHook: Send {
     fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex);
 }
 
+#[derive(Clone)]
+pub(crate) struct AlertHook {
+    alerts_sent_by_connection: Arc<Mutex<HashMap<(NodeIndex, NodeIndex), usize>>>,
+}
+
+impl AlertHook {
+    pub(crate) fn new() -> Self {
+        AlertHook {
+            alerts_sent_by_connection: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub(crate) fn count(&self, sender: NodeIndex, recipient: NodeIndex) -> usize {
+        match self
+            .alerts_sent_by_connection
+            .lock()
+            .get(&(sender, recipient))
+        {
+            Some(count) => *count,
+            None => 0,
+        }
+    }
+}
+
+impl NetworkHook for AlertHook {
+    fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex) {
+        use crate::{alerts::AlertMessage::*, network::NetworkDataInner::*};
+        if let crate::NetworkData(Alert(ForkAlert(_))) = data {
+            *self
+                .alerts_sent_by_connection
+                .lock()
+                .entry((sender, recipient))
+                .or_insert(0) += 1;
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Hash)]
 pub struct Data {
     coord: UnitCoord,
@@ -517,41 +554,4 @@ pub fn spawn_honest_member(
     };
     spawner.spawn("member", member_task);
     (rx_batch, exit_tx)
-}
-
-#[derive(Clone)]
-pub(crate) struct AlertHook {
-    alerts_sent_by_connection: Arc<Mutex<HashMap<(NodeIndex, NodeIndex), usize>>>,
-}
-
-impl AlertHook {
-    pub(crate) fn new() -> Self {
-        AlertHook {
-            alerts_sent_by_connection: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    pub(crate) fn count(&self, sender: NodeIndex, recipient: NodeIndex) -> usize {
-        match self
-            .alerts_sent_by_connection
-            .lock()
-            .get(&(sender, recipient))
-        {
-            Some(count) => *count,
-            None => 0,
-        }
-    }
-}
-
-impl NetworkHook for AlertHook {
-    fn update_state(&mut self, data: &mut NetworkData, sender: NodeIndex, recipient: NodeIndex) {
-        use crate::{alerts::AlertMessage::*, network::NetworkDataInner::*};
-        if let crate::NetworkData(Alert(ForkAlert(_))) = data {
-            *self
-                .alerts_sent_by_connection
-                .lock()
-                .entry((sender, recipient))
-                .or_insert(0) += 1;
-        }
-    }
 }

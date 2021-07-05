@@ -25,7 +25,8 @@ pub use signed::*;
 mod config;
 pub mod rmc;
 mod terminal;
-mod testing;
+#[cfg(any(test, feature = "mock_common"))]
+pub mod testing;
 mod units;
 
 /// The number of a session for which the consensus is run.
