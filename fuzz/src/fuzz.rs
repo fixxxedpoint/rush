@@ -6,7 +6,7 @@ use futures::task::Poll;
 use parking_lot::Mutex;
 use std::{
     pin::Pin,
-    sync::{atomic::AtomicBool, atomic::AtomicU64, Arc},
+    sync::{atomic::AtomicBool, Arc},
 };
 
 use aleph_bft::{NodeCount, NodeIndex, SpawnHandle};
@@ -312,7 +312,7 @@ impl<R: Read> Iterator for ReadToNetworkDataIterator<R> {
 
 #[derive(Clone)]
 struct Spawner {
-    handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    spawner: Arc<aleph_mock::Spawner>,
     idle_mx: Arc<Mutex<()>>,
     wake_flag: Arc<AtomicBool>,
 }
@@ -343,22 +343,20 @@ impl<T: Future<Output = ()> + Send + 'static> Future for SpawnFuture<T> {
 }
 
 impl SpawnHandle for Spawner {
-    fn spawn(&self, _name: &str, task: impl Future<Output = ()> + Send + 'static) {
+    fn spawn(&self, _name: &'static str, task: impl Future<Output = ()> + Send + 'static) {
         let wrapped = SpawnFuture::new(task, self.wake_flag.clone());
-        self.handles.lock().push(tokio::spawn(wrapped))
+        self.spawner.spawn(_name, wrapped)
     }
 }
 
 impl Spawner {
     pub async fn wait(&self) {
-        for h in self.handles.lock().iter_mut() {
-            let _ = h.await;
-        }
+        self.spawner.wait().await
     }
 
     pub fn new() -> Self {
         Spawner {
-            handles: Arc::new(Mutex::new(Vec::new())),
+            spawner: Arc::new(aleph_mock::Spawner::new()),
             idle_mx: Arc::new(Mutex::new(())),
             wake_flag: Arc::new(AtomicBool::new(false)),
         }
@@ -373,7 +371,7 @@ impl Spawner {
 
         loop {
             yield_now().await;
-            if !self
+            if self
                 .wake_flag
                 .swap(true, std::sync::atomic::Ordering::Relaxed)
             {
