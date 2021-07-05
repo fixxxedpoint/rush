@@ -10,7 +10,7 @@ mod crash;
 mod dag;
 #[cfg(test)]
 pub(crate) mod mock;
-#[cfg(any(test, feature = "mock_common"))]
+#[cfg(feature = "mock_common")]
 pub mod mock_common;
 #[cfg(test)]
 mod rmc;

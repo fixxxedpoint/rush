@@ -10,7 +10,7 @@ use crate::{
     signed::Signed,
     testing::mock::{
         configure_network, init_log, spawn_honest_member, AlertHook, Data, Hash64, Hasher64,
-        KeyBox, Network, NetworkData, PartialMultisignature, Signature, Spawner,
+        KeyBox, Network, NetworkData, Spawner,
     },
     units::{ControlHash, FullUnit, PreUnit, SignedUnit, UnitCoord},
     Hasher, Index, Network as NetworkT, NetworkData as NetworkDataT, NodeCount, NodeIndex, Round,
@@ -27,14 +27,14 @@ struct MaliciousMember<'a> {
     forking_round: Round,
     round_in_progress: Round,
     keybox: &'a KeyBox,
-    network: Network<Hasher64, Data, Signature, PartialMultisignature>,
+    network: Network,
     unit_store: HashMap<UnitCoord, SignedUnit<'a, Hasher64, Data, KeyBox>>,
 }
 
 impl<'a> MaliciousMember<'a> {
     fn new(
         keybox: &'a KeyBox,
-        network: Network<Hasher64, Data, Signature, PartialMultisignature>,
+        network: Network,
         node_ix: NodeIndex,
         n_members: NodeCount,
         session_id: SessionId,
@@ -185,7 +185,7 @@ fn spawn_malicious_member(
     node_index: NodeIndex,
     n_members: NodeCount,
     round_to_fork: Round,
-    network: Network<Hasher64, Data, Signature, PartialMultisignature>,
+    network: Network,
 ) -> oneshot::Sender<()> {
     let (exit_tx, exit_rx) = oneshot::channel();
     let member_task = async move {
@@ -228,8 +228,7 @@ async fn honest_members_agree_on_batches_byzantine(
             let exit_tx = spawn_malicious_member(spawner.clone(), ix, n_members, 2, network);
             exits.push(exit_tx);
         } else {
-            let (batch_rx, exit_tx) =
-                spawn_honest_member(spawner.clone(), network.index(), n_members, network);
+            let (batch_rx, exit_tx) = spawn_honest_member(spawner.clone(), ix, n_members, network);
             batch_rxs.push(batch_rx);
             exits.push(exit_tx);
         }
