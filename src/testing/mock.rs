@@ -25,9 +25,9 @@ use crate::{
     config::{exponential_slowdown, Config, DelayConfig},
     member::{NotificationIn, NotificationOut},
     units::{Unit, UnitCoord},
-    DataIO as DataIOT, Hasher, Index, KeyBox as KeyBoxT, MultiKeychain as MultiKeychainT,
-    Network as NetworkT, NodeCount, NodeIndex, OrderedBatch,
-    PartialMultisignature as PartialMultisignatureT, SpawnHandle,
+    DataIO as DataIOT, DataState, Hasher, Index, KeyBox as KeyBoxT,
+    MultiKeychain as MultiKeychainT, Network as NetworkT, NodeCount, NodeIndex, OrderedBatch,
+    PartialMultisignature as PartialMultisignatureT, Round, SpawnHandle, TaskHandle,
 };
 
 use crate::member::Member;
@@ -62,6 +62,20 @@ pub struct Spawner {
 impl SpawnHandle for Spawner {
     fn spawn(&self, _name: &str, task: impl Future<Output = ()> + Send + 'static) {
         self.handles.lock().push(tokio::spawn(task))
+    }
+
+    fn spawn_essential(
+        &self,
+        _: &str,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> TaskHandle {
+        let (res_tx, res_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            task.await;
+            res_tx.send(()).expect("We own the rx.");
+        });
+        self.handles.lock().push(task);
+        Box::pin(async move { res_rx.await.map_err(|_| ()) })
     }
 }
 
@@ -265,7 +279,7 @@ impl PartialMultisignatureT for PartialMultisignature {
 
 pub(crate) struct DataIO {
     ix: NodeIndex,
-    round_counter: Cell<usize>,
+    round_counter: Cell<Round>,
     tx: UnboundedSender<OrderedBatch<Data>>,
 }
 
@@ -276,11 +290,8 @@ impl DataIOT<Data> for DataIO {
         self.round_counter.set(self.round_counter.get() + 1);
         Data { coord, variant: 0 }
     }
-    fn check_availability(
-        &self,
-        _: &Data,
-    ) -> Option<Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send>>> {
-        None
+    fn check_availability(&self, _: &Data) -> DataState<Self::Error> {
+        DataState::Available
     }
     fn send_ordered_batch(&mut self, data: OrderedBatch<Data>) -> Result<(), ()> {
         self.tx.unbounded_send(data).map_err(|e| {
@@ -369,12 +380,14 @@ pub fn gen_config(node_ix: NodeIndex, n_members: NodeCount) -> Config {
 
 pub(crate) type HonestMember<'a> = Member<'a, Hasher64, Data, DataIO, KeyBox, Spawner>;
 
-pub fn configure_network(n_members: usize, reliability: f64) -> (UnreliableRouter, Vec<Network>) {
-    let peer_list = || (0..n_members).map(NodeIndex);
-
-    let mut router = UnreliableRouter::new(peer_list().collect(), reliability);
+pub fn configure_network(
+    n_members: NodeCount,
+    reliability: f64,
+) -> (UnreliableRouter, Vec<Network>) {
+    let peer_list = n_members.into_iterator().collect();
+    let mut router = UnreliableRouter::new(peer_list, reliability);
     let mut networks = Vec::new();
-    for ix in peer_list() {
+    for ix in n_members.into_iterator() {
         let network = router.connect_peer(ix);
         networks.push(network);
     }
@@ -384,15 +397,15 @@ pub fn configure_network(n_members: usize, reliability: f64) -> (UnreliableRoute
 pub fn spawn_honest_member(
     spawner: Spawner,
     node_index: NodeIndex,
-    n_members: usize,
+    n_members: NodeCount,
     network: impl 'static + NetworkT<Hasher64, Data, Signature, PartialMultisignature>,
 ) -> (UnboundedReceiver<OrderedBatch<Data>>, oneshot::Sender<()>) {
     let (data_io, rx_batch) = DataIO::new(node_index);
-    let config = gen_config(node_index, n_members.into());
+    let config = gen_config(node_index, n_members);
     let (exit_tx, exit_rx) = oneshot::channel();
     let spawner_inner = spawner.clone();
     let member_task = async move {
-        let keybox = KeyBox::new(NodeCount(n_members), node_index);
+        let keybox = KeyBox::new(n_members, node_index);
         let member = HonestMember::new(data_io, &keybox, config, spawner_inner.clone());
         member.run_session(network, exit_rx).await;
     };

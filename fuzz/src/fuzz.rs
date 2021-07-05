@@ -9,7 +9,7 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 
-use aleph_bft::{NodeCount, NodeIndex, SpawnHandle};
+use aleph_bft::{DataState, NodeCount, NodeIndex, SpawnHandle, TaskHandle};
 use aleph_mock::{configure_network, init_log, spawn_honest_member_generic, NetworkHook};
 
 use codec::{Decode, Encode, IoReader};
@@ -78,11 +78,8 @@ impl DataIOT<self::Data> for DataIO {
         Data::new()
     }
 
-    fn check_availability(
-        &self,
-        _: &Data,
-    ) -> Option<Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send>>> {
-        None
+    fn check_availability(&self, _: &Data) -> DataState<Self::Error> {
+        DataState::Available
     }
 
     fn send_ordered_batch(&mut self, data: OrderedBatch<Data>) -> Result<(), ()> {
@@ -346,6 +343,15 @@ impl SpawnHandle for Spawner {
     fn spawn(&self, _name: &'static str, task: impl Future<Output = ()> + Send + 'static) {
         let wrapped = SpawnFuture::new(task, self.wake_flag.clone());
         self.spawner.spawn(_name, wrapped)
+    }
+
+    fn spawn_essential(
+        &self,
+        name: &'static str,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> TaskHandle {
+        let wrapped = SpawnFuture::new(task, self.wake_flag.clone());
+        self.spawner.spawn_essential(name, wrapped)
     }
 }
 

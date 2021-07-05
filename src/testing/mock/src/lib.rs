@@ -23,9 +23,9 @@ use std::{
 use aleph_bft::testing::mock_common::gen_config;
 
 use aleph_bft::{
-    DataIO as DataIOT, Hasher, Index, KeyBox as KeyBoxT, Member, MultiKeychain as MultiKeychainT,
-    Network as NetworkT, NodeCount, NodeIndex, OrderedBatch,
-    PartialMultisignature as PartialMultisignatureT, SpawnHandle,
+    DataIO as DataIOT, DataState, Hasher, Index, KeyBox as KeyBoxT, Member,
+    MultiKeychain as MultiKeychainT, Network as NetworkT, NodeCount, NodeIndex, OrderedBatch,
+    PartialMultisignature as PartialMultisignatureT, SpawnHandle, TaskHandle,
 };
 
 pub fn init_log() {
@@ -60,6 +60,20 @@ pub struct Spawner {
 impl SpawnHandle for Spawner {
     fn spawn(&self, _name: &str, task: impl Future<Output = ()> + Send + 'static) {
         self.handles.lock().push(tokio::spawn(task))
+    }
+
+    fn spawn_essential(
+        &self,
+        _: &str,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> TaskHandle {
+        let (res_tx, res_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            task.await;
+            res_tx.send(()).expect("We own the rx.");
+        });
+        self.handles.lock().push(task);
+        Box::pin(async move { res_rx.await.map_err(|_| ()) })
     }
 }
 
@@ -326,11 +340,8 @@ impl DataIOT<Data> for DataIO {
         self.round_counter.set(self.round_counter.get() + 1);
         Data::new(self.ix, self.round_counter.get())
     }
-    fn check_availability(
-        &self,
-        _: &Data,
-    ) -> Option<Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send>>> {
-        None
+    fn check_availability(&self, _: &Data) -> DataState<Self::Error> {
+        DataState::Available
     }
     fn send_ordered_batch(&mut self, data: OrderedBatch<Data>) -> Result<(), ()> {
         self.tx.unbounded_send(data).map_err(|e| {
