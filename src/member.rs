@@ -303,7 +303,7 @@ where
         ));
     }
 
-    pub(crate) fn on_missing_coords(&mut self, coords: Vec<UnitCoord>) {
+    fn on_missing_coords(&mut self, coords: Vec<UnitCoord>) {
         trace!(target: "AlephBFT-member", "{:?} Dealing with missing coords notification {:?}.", self.index(), coords);
         let curr_time = time::Instant::now();
         for coord in coords {
