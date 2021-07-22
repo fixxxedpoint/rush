@@ -13,7 +13,6 @@ pub use member::Member;
 pub use network::{Network, NetworkData};
 pub use nodes::{NodeCount, NodeIndex};
 
-mod airstrip;
 mod alerts;
 mod consensus;
 mod creator;
@@ -21,6 +20,7 @@ mod extender;
 mod member;
 mod network;
 mod nodes;
+mod runway;
 mod signed;
 pub use signed::*;
 mod config;

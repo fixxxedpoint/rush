@@ -1,37 +1,28 @@
 use crate::{
-    alerts::{Alert, ForkProof, ForkingNotification},
+    alerts::{Alert, Alerter, ForkProof, ForkingNotification},
     member::{NotificationIn, NotificationOut, UnitMessage},
     network::Recipient,
     nodes::NodeMap,
+    terminal::Terminal,
     units::{
         ControlHash, FullUnit, PreUnit, SignedUnit, UncheckedSignedUnit, UnitCoord, UnitStore,
     },
-    Config, Data, Hasher, Index, KeyBox, MultiKeychain, NodeCount, NodeIndex, OrderedBatch,
-    Receiver, Sender, Signed,
+    Config, Data, DataIO, Hasher, Index, KeyBox, MultiKeychain, NodeCount, NodeIndex, OrderedBatch,
+    Receiver, Sender, Signed, SpawnHandle,
 };
 use futures::channel::oneshot;
 use log::{debug, error, info, trace, warn};
 
-#[derive(Eq, PartialEq)]
-enum ExternalTask<'a, H: Hasher, D, MK>
-where
-    D: Data,
-    MK: KeyBox,
-{
-    CoordRequest(UnitCoord),
-    ParentsRequest(H::Hash),
-    //The hash of a unit, and the number of this multicast (i.e., how many times was the unit multicast already).
-    UnitMulticast(H::Hash, usize, Signed<'a, FullUnit<H, D>, MK>),
-}
-
-pub(crate) struct Airstrip<'a, H, D, MK, C>
+pub(crate) struct Runway<'a, H, D, MK, DP, NH, SH>
 where
     H: Hasher,
     D: Data,
     // DP: DataIO<D>,
     MK: MultiKeychain,
     // SH: SpawnHandle,
-    C: Fn(ExternalTask<H, D, MK>),
+    DP: DataIO<D>,
+    NH: FnMut(UnitMessage<H, D, MK::Signature>),
+    SH: SpawnHandle,
 {
     config: Config,
     store: UnitStore<'a, H, D, MK>,
@@ -40,22 +31,74 @@ where
     alerts_for_alerter: Sender<Alert<H, D, MK::Signature>>,
     notifications_from_alerter: Receiver<ForkingNotification<H, D, MK::Signature>>,
     unit_messages_for_network: Option<Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>>,
+    unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
     tx_consensus: Sender<NotificationIn<H>>,
     rx_consensus: Receiver<NotificationOut<H>>,
-    unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
     ordered_batch_rx: Receiver<Vec<H::Hash>>,
-    requests_handler: C,
+    notification_handler: H,
+    data_io: DP,
+    spawn_handle: SH,
+    alerter: Alerter<'a, H, D, MK>,
+    terminal: Terminal<H>,
 }
 
-impl<'a, H, D, MK, C> Airstrip<'a, H, D, MK, C>
+pub(crate) struct RunwayConfig<
+    'a,
+    H: Hasher,
+    D: Data,
+    MK: MultiKeychain,
+    DP: DataIO<D>,
+    SH: SpawnHandle,
+> {
+    config: Config,
+    data_io: DP,
+    keybox: &'a MK,
+    spawn_handle: SH,
+    alerter: (
+        Alerter<'a, H, D, MK>,
+        Receiver<ForkingNotification<H, D, MK::Signature>>,
+        Sender<Alert<H, D, MK::Signature>>,
+    ),
+    terminal: (
+        Terminal<H>,
+        Receiver<NotificationIn<H>>,
+        Sender<NotificationOut<H>>,
+    ),
+}
+
+impl<'a, H, D, MK, DP, NH, SH> Runway<'a, H, D, MK, DP, NH, SH>
 where
     H: Hasher,
     D: Data,
-    // DP: DataIO<D>,
     MK: MultiKeychain,
-    // SH: SpawnHandle,
-    C: Fn(ExternalTask<H, D, MK>),
+    DP: DataIO<D>,
+    NH: FnMut(NotificationOut<H>),
+    SH: SpawnHandle,
 {
+    pub(crate) fn new(config: RunwayConfig<'a, H, D, MK, DP, SH>) -> Self {
+        let n_members = config.n_members;
+        let threshold = (n_members * 2) / 3 + NodeCount(1);
+        let max_round = config.max_round;
+        Runway {
+            config,
+            store: UnitStore::new(n_members, threshold, max_round),
+            index: config.config.node_ix,
+            keybox: config.keybox,
+            alerts_for_alerter: config.alerter.2,
+            notifications_from_alerter: config.alerter.1,
+            alerter: config.alerter.0,
+            tx_consensus: config.terminal.2,
+            rx_consensus: config.terminal.1,
+            terminal: config.terminal.0,
+            data_io,
+            requests: BinaryHeap::new(),
+            threshold,
+            n_members,
+            unit_messages_for_network: None,
+            spawn_handle,
+        }
+    }
+
     fn index(&self) -> NodeIndex {
         self.config.node_ix
     }
@@ -379,19 +422,17 @@ where
         let hash: <H as Hasher>::Hash = full_unit.hash();
         let signed_unit: Signed<FullUnit<H, D>, MK> = Signed::sign(full_unit, self.keybox).await;
         self.store.add_unit(signed_unit, false);
-        (self.requests_handler)(ExternalTask::UnitMulticast(hash, 0, signed_unit))(
-            self.on_create_notify,
-        )(hash, signed_unit);
+
+        let message = UnitMessage::<H, D, MK::Signature>::NewUnit(signed_unit.into());
+        trace!(target: "AlephBFT-runway", "{:?} Sending a unit {:?}.", self.index(), hash);
+        (self.notification_handler)((message, Recipient::Everyone));
     }
 
     pub(crate) fn on_missing_coords(&mut self, coords: Vec<UnitCoord>) {
         trace!(target: "AlephBFT-member", "{:?} Dealing with missing coords notification {:?}.", self.index(), coords);
-        for coord in coords {
-            if !self.store.contains_coord(&coord) {
-                (self.requests_handler)(ExternalTask::CoordRequest(coord));
-            }
-        }
-        self.trigger_tasks();
+        (self.notification_handler)(NotificationOut::MissingUnits(
+            coords.retain(|coord| !self.store.contains_coord(coord)),
+        ));
     }
 
     fn on_wrong_control_hash(&mut self, u_hash: H::Hash) {
@@ -403,7 +444,7 @@ where
             trace!(target: "AlephBFT-member", "{:?} We have the parents for {:?} even though we did not request them.", self.index(), u_hash);
             self.send_consensus_notification(NotificationIn::UnitParents(u_hash, p_hashes));
         } else {
-            (self.requests_handler)(ExternalTask::ParentsRequest(u_hash));
+            (self.notification_handler)(NotificationOut::WrongControlHash(u_hash));
         }
     }
 
@@ -424,7 +465,17 @@ where
         }
     }
 
-    pub async fn run_session(mut self, mut exit: oneshot::Receiver<()>) {
+    fn move_units_to_consensus(&mut self) {
+        let units_to_move = self
+            .store
+            .yield_buffer_units()
+            .into_iter()
+            .map(|su| su.as_signable().unit())
+            .collect();
+        self.send_consensus_notification(NotificationIn::NewUnits(units_to_move))
+    }
+
+    pub async fn run(mut self, mut exit: oneshot::Receiver<()>) {
         info!(target: "AlephBFT-airstrip", "{:?} Airstrip started.", self.index());
         loop {
             futures::select! {

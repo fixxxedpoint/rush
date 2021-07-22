@@ -222,14 +222,14 @@ impl<'a, T: Signable + Index, KB: KeyBox> Signed<T, KB> {
     }
 }
 
-impl<'a, T: Signable, KB: KeyBox> Signed<'a, Indexed<T>, KB> {
+impl<'a, T: Signable, KB: KeyBox> Signed<Indexed<T>, KB> {
     /// Create a signed object from a signable. The index is added based on the index of the `key_box`.
     pub async fn sign_with_index(signable: T, key_box: &'a KB) -> Signed<'a, Indexed<T>, KB> {
         Signed::sign(Indexed::new(signable, key_box.index()), key_box).await
     }
 }
 
-impl<'a, T: Signable, MK: MultiKeychain> Signed<'a, Indexed<T>, MK> {
+impl<'a, T: Signable, MK: MultiKeychain> Signed<Indexed<T>, MK> {
     /// Transform a singly signed object into a partially multisigned consisting of just the signed object.
     /// Note that depending on the setup, it may yield a complete signature.
     pub fn into_partially_multisigned(self, keychain: &'a MK) -> PartiallyMultisigned<'a, T, MK> {
@@ -249,10 +249,8 @@ impl<'a, T: Signable, MK: MultiKeychain> Signed<'a, Indexed<T>, MK> {
     }
 }
 
-impl<'a, T: Signable + Index, KB: KeyBox> From<Signed<'a, T, KB>>
-    for UncheckedSigned<T, KB::Signature>
-{
-    fn from(signed: Signed<'a, T, KB>) -> Self {
+impl<T: Signable + Index, KB: KeyBox> From<Signed<T, KB>> for UncheckedSigned<T, KB::Signature> {
+    fn from(signed: Signed<T, KB>) -> Self {
         signed.into_unchecked()
     }
 }
@@ -386,7 +384,7 @@ impl<'a, T: Signable, MK: MultiKeychain> PartiallyMultisigned<'a, T, MK> {
     }
 
     /// Adds a signature and checks if multisignature is complete.
-    pub fn add_signature(self, signed: Signed<'a, Indexed<T>, MK>, keychain: &'a MK) -> Self {
+    pub fn add_signature(self, signed: Signed<Indexed<T>, MK>, keychain: &'a MK) -> Self {
         if self.as_signable().hash().as_ref() != signed.as_signable().hash().as_ref() {
             warn!(target: "AlephBFT-signed", "Tried to add a signature of a different object");
             return self;
