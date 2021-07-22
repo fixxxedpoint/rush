@@ -1,5 +1,6 @@
 use crate::{
     alerts::{Alert, Alerter, ForkProof, ForkingNotification},
+    consensus::Consensus,
     member::{NotificationIn, NotificationOut, UnitMessage},
     network::Recipient,
     nodes::NodeMap,
@@ -21,7 +22,7 @@ where
     MK: MultiKeychain,
     // SH: SpawnHandle,
     DP: DataIO<D>,
-    NH: FnMut(UnitMessage<H, D, MK::Signature>),
+    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
     SH: SpawnHandle,
 {
     config: Config,
@@ -30,7 +31,7 @@ where
     keybox: &'a MK,
     alerts_for_alerter: Sender<Alert<H, D, MK::Signature>>,
     notifications_from_alerter: Receiver<ForkingNotification<H, D, MK::Signature>>,
-    unit_messages_for_network: Option<Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>>,
+    unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
     unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
     tx_consensus: Sender<NotificationIn<H>>,
     rx_consensus: Receiver<NotificationOut<H>>,
@@ -39,7 +40,6 @@ where
     data_io: DP,
     spawn_handle: SH,
     alerter: Alerter<'a, H, D, MK>,
-    terminal: Terminal<H>,
 }
 
 pub(crate) struct RunwayConfig<
@@ -59,11 +59,19 @@ pub(crate) struct RunwayConfig<
         Receiver<ForkingNotification<H, D, MK::Signature>>,
         Sender<Alert<H, D, MK::Signature>>,
     ),
-    terminal: (
-        Terminal<H>,
-        Receiver<NotificationIn<H>>,
-        Sender<NotificationOut<H>>,
+    consensus: (
+        Consensus<H>,
+        Sender<NotificationIn<H>>,
+        Receiver<NotificationOut<H>>,
+        Receiver<OrderedBatch<H::Hash>>,
     ),
+    unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
+    unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
+    // terminal: (
+    //     Terminal<H>,
+    //     Receiver<NotificationIn<H>>,
+    //     Sender<NotificationOut<H>>,
+    // ),
 }
 
 impl<'a, H, D, MK, DP, NH, SH> Runway<'a, H, D, MK, DP, NH, SH>
@@ -75,7 +83,10 @@ where
     NH: FnMut(NotificationOut<H>),
     SH: SpawnHandle,
 {
-    pub(crate) fn new(config: RunwayConfig<'a, H, D, MK, DP, SH>) -> Self {
+    pub(crate) fn new(
+        config: RunwayConfig<'a, H, D, MK, DP, SH>,
+        handler: impl FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
+    ) -> Self {
         let n_members = config.n_members;
         let threshold = (n_members * 2) / 3 + NodeCount(1);
         let max_round = config.max_round;
@@ -87,15 +98,14 @@ where
             alerts_for_alerter: config.alerter.2,
             notifications_from_alerter: config.alerter.1,
             alerter: config.alerter.0,
-            tx_consensus: config.terminal.2,
-            rx_consensus: config.terminal.1,
-            terminal: config.terminal.0,
-            data_io,
-            requests: BinaryHeap::new(),
-            threshold,
-            n_members,
-            unit_messages_for_network: None,
-            spawn_handle,
+            tx_consensus: config.consensus.2,
+            rx_consensus: config.consensus.1,
+            data_io: config.data_io,
+            unit_messages_for_network: config.unit_messages_for_network,
+            unit_messages_from_network: config.unit_messages_from_network,
+            spawn_handle: config.spawn_handle,
+            ordered_batch_rx: config.consensus.3,
+            notification_handler: handler,
         }
     }
 
@@ -425,14 +435,15 @@ where
 
         let message = UnitMessage::<H, D, MK::Signature>::NewUnit(signed_unit.into());
         trace!(target: "AlephBFT-runway", "{:?} Sending a unit {:?}.", self.index(), hash);
-        (self.notification_handler)((message, Recipient::Everyone));
+        (self.notification_handler)((message, Some(Recipient::Everyone)));
     }
 
     pub(crate) fn on_missing_coords(&mut self, coords: Vec<UnitCoord>) {
-        trace!(target: "AlephBFT-member", "{:?} Dealing with missing coords notification {:?}.", self.index(), coords);
-        (self.notification_handler)(NotificationOut::MissingUnits(
-            coords.retain(|coord| !self.store.contains_coord(coord)),
-        ));
+        trace!(target: "AlephBFT-runway", "{:?} Dealing with missing coords notification {:?}.", self.index(), coords);
+        for coord in coords.retain(|coord| !self.store.contains_coord(coord)) {
+            let message = UnitMessage::<H, D, MK::Signature>::RequestCoord(self.index(), coord);
+            (self.notification_handler)((message, None));
+        }
     }
 
     fn on_wrong_control_hash(&mut self, u_hash: H::Hash) {
@@ -444,7 +455,8 @@ where
             trace!(target: "AlephBFT-member", "{:?} We have the parents for {:?} even though we did not request them.", self.index(), u_hash);
             self.send_consensus_notification(NotificationIn::UnitParents(u_hash, p_hashes));
         } else {
-            (self.notification_handler)(NotificationOut::WrongControlHash(u_hash));
+            let message = UnitMessage::<H, D, MK::Signature>::RequestParents(self.index(), u_hash);
+            (self.notification_handler)((message, None));
         }
     }
 
