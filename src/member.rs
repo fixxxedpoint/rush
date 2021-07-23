@@ -12,6 +12,7 @@ use crate::{
     config::Config,
     consensus,
     network::{NetworkHub, Recipient},
+    runway::{Runway, RunwayConfigBuilder},
     signed::{Signature, Signed},
     units::{
         ControlHash, FullUnit, PreUnit, SignedUnit, UncheckedSignedUnit, Unit, UnitCoord, UnitStore,
@@ -82,18 +83,18 @@ pub(crate) enum NotificationOut<H: Hasher> {
 enum Task<H: Hasher> {
     CoordRequest(UnitCoord),
     ParentsRequest(H::Hash),
-    //The hash of a unit, and the number of this multicast (i.e., how many times was the unit multicast already).
-    UnitMulticast(H::Hash, usize),
+    //The index of a unit in our local store, and the number of this multicast (i.e., how many times was the unit multicast already).
+    UnitMulticast(usize, usize),
 }
 
 #[derive(Eq, PartialEq)]
-struct ScheduledTask<H: Hasher> {
-    task: Task<H>,
+struct ScheduledTask<H: Hasher, D: Data, MK: MultiKeychain> {
+    task: Task<'a, H, D, MK>,
     scheduled_time: time::Instant,
 }
 
-impl<H: Hasher> ScheduledTask<H> {
-    fn new(task: Task<H>, scheduled_time: time::Instant) -> Self {
+impl<'a, H: Hasher, D: Data, MK: MultiKeychain> ScheduledTask<'a, H, D, MK> {
+    fn new(task: Task<'a, H, D, MK>, scheduled_time: time::Instant) -> Self {
         ScheduledTask {
             task,
             scheduled_time,
@@ -101,14 +102,14 @@ impl<H: Hasher> ScheduledTask<H> {
     }
 }
 
-impl<H: Hasher> Ord for ScheduledTask<H> {
+impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Ord for ScheduledTask<'a, H, D, MK> {
     fn cmp(&self, other: &Self) -> Ordering {
         // we want earlier times to come first when used in max-heap, hence the below:
         other.scheduled_time.cmp(&self.scheduled_time)
     }
 }
 
-impl<H: Hasher> PartialOrd for ScheduledTask<H> {
+impl<'a, H: Hasher, D: Data, MK: MultiKeychain> PartialOrd for ScheduledTask<'a, H, D, MK> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -139,12 +140,13 @@ where
     data_io: DP,
     keybox: &'a MK,
     store: UnitStore<'a, H, D, MK>,
-    requests: BinaryHeap<ScheduledTask<H>>,
+    requests: BinaryHeap<ScheduledTask<'a, H, D, MK>>,
     threshold: NodeCount,
     n_members: NodeCount,
     unit_messages_for_network: Option<Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>>,
     alerts_for_alerter: Option<Sender<Alert<H, D, MK::Signature>>>,
     spawn_handle: SH,
+    scheduled_units: Vec<UncheckedSignedUnit<H, D, MK::Signature>>,
 }
 
 impl<'a, H, D, DP, MK, SH> Member<'a, H, D, DP, MK, SH>
@@ -174,6 +176,7 @@ where
             unit_messages_for_network: None,
             alerts_for_alerter: None,
             spawn_handle,
+            scheduled_units: Vec::new(),
         }
     }
 
@@ -183,6 +186,12 @@ where
             .unwrap()
             .unbounded_send(notification)
             .expect("Channel to consensus should be open")
+    }
+
+    async fn on_create_new(&mut self, u: PreUnit<H>) {
+        let curr_time = time::Instant::now();
+        let task = ScheduledTask::new(Task::UnitMulticast(hash, 0), curr_time);
+        self.requests.push(task);
     }
 
     async fn on_create(&mut self, u: PreUnit<H>) {
@@ -654,6 +663,20 @@ where
         }
     }
 
+    fn on_unit_message_from_units(
+        &mut self,
+        message: UnitMessage<H, D, MK::Signature>,
+        recipient: Recipient,
+    ) {
+        match message {
+            UnitMessage::NewUnit(_) => todo!(),
+            UnitMessage::RequestCoord(_, _) => todo!(),
+            UnitMessage::ResponseCoord(_) => todo!(),
+            UnitMessage::RequestParents(_, _) => todo!(),
+            UnitMessage::ResponseParents(_, _) => todo!(),
+        }
+    }
+
     /// Actually start the Member as an async task. It stops establishing consensus for new data items after
     /// reaching the threshold specified in [`Config::max_round`] or upon receiving a stop signal from `exit`.
     pub async fn run_session<
@@ -663,33 +686,17 @@ where
         network: N,
         mut exit: oneshot::Receiver<()>,
     ) {
-        let (tx_consensus, consensus_stream) = mpsc::unbounded();
-        let (consensus_sink, mut rx_consensus) = mpsc::unbounded();
-        let (ordered_batch_tx, mut ordered_batch_rx) = mpsc::unbounded();
-        let (consensus_exit, exit_stream) = oneshot::channel();
+        info!(target: "AlephBFT-member", "{:?} Spawning party for a session.", self.index());
         let config = self.config.clone();
         let sh = self.spawn_handle.clone();
-        info!(target: "AlephBFT-member", "{:?} Spawning party for a session.", self.index());
-        let mut consensus_handle = self
-            .spawn_handle
-            .spawn_essential("member/consensus", async move {
-                consensus::run(
-                    config,
-                    consensus_stream,
-                    consensus_sink,
-                    ordered_batch_tx,
-                    sh,
-                    exit_stream,
-                )
-                .await
-            })
-            .fuse();
-        self.tx_consensus = Some(tx_consensus);
+
         let (alert_messages_for_alerter, alert_messages_from_network) = mpsc::unbounded();
         let (alert_messages_for_network, alert_messages_from_alerter) = mpsc::unbounded();
         let (unit_messages_for_units, mut unit_messages_from_network) = mpsc::unbounded();
         let (unit_messages_for_network, unit_messages_from_units) = mpsc::unbounded();
+        let (unit_messages_for_network_proxy, unit_messages_from_units_proxy) = mpsc::unbounded();
         let (network_exit, exit_stream) = oneshot::channel();
+        info!(target: "AlephBFT-member", "{:?} Spawning network.", self.index());
         let mut network_handle = self
             .spawn_handle
             .spawn_essential("member/network", async move {
@@ -704,32 +711,19 @@ where
                 .await
             })
             .fuse();
-        self.unit_messages_for_network = Some(unit_messages_for_network);
-        let (alert_notifications_for_units, mut notifications_from_alerter) = mpsc::unbounded();
-        let (alerts_for_alerter, alerts_from_units) = mpsc::unbounded();
-        let (alerter_exit, exit_stream) = oneshot::channel();
-        let keybox_for_alerter = self.keybox.clone();
-        let alert_config = AlertConfig {
-            session_id: self.config.session_id,
-            max_units_per_alert: self.config.max_units_per_alert,
-            n_members: self.n_members,
-        };
-        let mut alerts_handle = self
-            .spawn_handle
-            .spawn_essential("member/alerts", async move {
-                alerts::run(
-                    keybox_for_alerter,
-                    alert_messages_for_network,
-                    alert_messages_from_network,
-                    alert_notifications_for_units,
-                    alerts_from_units,
-                    alert_config,
-                    exit_stream,
-                )
-                .await
-            })
-            .fuse();
-        self.alerts_for_alerter = Some(alerts_for_alerter);
+
+        let runway_config = RunwayConfigBuilder::build(
+            config,
+            self.keybox,
+            self.data_io,
+            self.spawn_handle,
+            alert_messages_for_network,
+            alert_messages_from_network,
+            unit_messages_for_network_proxy,
+            unit_messages_from_network,
+        );
+        let runway = Runway::new(runway_config, |unit_message| {});
+
         let ticker_delay = self.config.delay_config.tick_interval;
         let mut ticker = Delay::new(ticker_delay).fuse();
 
@@ -739,6 +733,16 @@ where
         info!(target: "AlephBFT-member", "{:?} Start routing messages from consensus to network", self.index());
         loop {
             futures::select! {
+                event = unit_messages_from_units_proxy.next() => match event {
+                    Some((message, recipient)) => {
+                        self.on_unit_message_from_units(message, recipient);
+                    },
+                    None => {
+                        error!(target: "AlephBFT-member", "{:?} Unit message stream from Runway closed.", self.index());
+                        break;
+                    },
+                },
+
                 notification = rx_consensus.next() => match notification {
                         Some(notification) => self.on_consensus_notification(notification).await,
                         None => {

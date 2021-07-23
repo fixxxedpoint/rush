@@ -21,6 +21,20 @@ pub(crate) struct Consensus<H: Hasher> {
 }
 
 impl<H: Hasher> Consensus<H> {
+    pub(crate) fn new(
+        conf: Config,
+        incoming_notifications: Receiver<NotificationIn<H>>,
+        outgoing_notifications: Sender<NotificationOut<H>>,
+        ordered_batch_tx: Sender<OrderedBatch<H::Hash>>,
+    ) -> Self {
+        Consensus {
+            conf,
+            incoming_notifications,
+            outgoing_notifications,
+            ordered_batch_tx,
+        }
+    }
+
     pub(crate) async fn run(self, spawn_handle: impl SpawnHandle, mut exit: oneshot::Receiver<()>) {
         info!(target: "AlephBFT", "{:?} Starting all services...", self.conf.node_ix);
 

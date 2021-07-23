@@ -1,26 +1,23 @@
 use crate::{
-    alerts::{Alert, Alerter, ForkProof, ForkingNotification},
+    alerts::{Alert, AlertConfig, AlertMessage, Alerter, ForkProof, ForkingNotification},
     consensus::Consensus,
     member::{NotificationIn, NotificationOut, UnitMessage},
     network::Recipient,
     nodes::NodeMap,
-    terminal::Terminal,
     units::{
         ControlHash, FullUnit, PreUnit, SignedUnit, UncheckedSignedUnit, UnitCoord, UnitStore,
     },
     Config, Data, DataIO, Hasher, Index, KeyBox, MultiKeychain, NodeCount, NodeIndex, OrderedBatch,
     Receiver, Sender, Signed, SpawnHandle,
 };
-use futures::channel::oneshot;
+use futures::channel::{mpsc, oneshot};
 use log::{debug, error, info, trace, warn};
 
 pub(crate) struct Runway<'a, H, D, MK, DP, NH, SH>
 where
     H: Hasher,
     D: Data,
-    // DP: DataIO<D>,
     MK: MultiKeychain,
-    // SH: SpawnHandle,
     DP: DataIO<D>,
     NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
     SH: SpawnHandle,
@@ -67,11 +64,66 @@ pub(crate) struct RunwayConfig<
     ),
     unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
     unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
-    // terminal: (
-    //     Terminal<H>,
-    //     Receiver<NotificationIn<H>>,
-    //     Sender<NotificationOut<H>>,
-    // ),
+}
+
+pub(crate) struct RunwayConfigBuilder {}
+
+impl RunwayConfigBuilder {
+    pub(crate) fn build<
+        'a,
+        H: Hasher,
+        D: Data,
+        MK: MultiKeychain,
+        DP: DataIO<D>,
+        SH: SpawnHandle,
+    >(
+        config: Config,
+        keychain: &'a MK,
+        data_io: DP,
+        spawn_handle: SH,
+        alert_messages_for_network: Sender<(
+            AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
+            Recipient,
+        )>,
+        alert_messages_from_network: Receiver<
+            AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
+        >,
+        unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
+        unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
+    ) -> RunwayConfig<'a, H, D, MK, DP, SH> {
+        let (tx_consensus, consensus_stream) = mpsc::unbounded();
+        let (consensus_sink, mut rx_consensus) = mpsc::unbounded();
+        let (ordered_batch_tx, mut ordered_batch_rx) = mpsc::unbounded();
+        let consensus = Consensus::new(config, consensus_stream, consensus_sink, ordered_batch_tx);
+
+        let (alert_notifications_for_units, mut notifications_from_alerter) = mpsc::unbounded();
+        let (alerts_for_alerter, alerts_from_units) = mpsc::unbounded();
+        let (alerter_exit, exit_stream) = oneshot::channel();
+        let alert_config = AlertConfig {
+            session_id: config.session_id,
+            max_units_per_alert: config.max_units_per_alert,
+            n_members: config.n_members,
+        };
+        let alerter = Alerter::new(
+            keychain,
+            alert_messages_for_network,
+            alert_messages_from_network,
+            alert_notifications_for_units,
+            alerts_from_units,
+            alert_config,
+        );
+
+        RunwayConfig {
+            config,
+            data_io,
+            keybox: keychain,
+            spawn_handle,
+            alerter: (alerter, notifications_from_alerter, alerts_for_alerter),
+            consensus: (consensus, tx_consensus, rx_consensus, ordered_batch_rx),
+            unit_messages_for_network,
+            unit_messages_from_network,
+        }
+    }
 }
 
 impl<'a, H, D, MK, DP, NH, SH> Runway<'a, H, D, MK, DP, NH, SH>
