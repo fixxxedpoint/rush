@@ -13,29 +13,32 @@ use crate::{
     Hasher, OrderedBatch, Receiver, Sender, SpawnHandle,
 };
 
-pub(crate) struct Consensus<H: Hasher> {
+pub(crate) struct Consensus<H: Hasher, SH: SpawnHandle> {
     conf: Config,
+    spawn_handle: SH,
     incoming_notifications: Receiver<NotificationIn<H>>,
     outgoing_notifications: Sender<NotificationOut<H>>,
     ordered_batch_tx: Sender<OrderedBatch<H::Hash>>,
 }
 
-impl<H: Hasher> Consensus<H> {
+impl<H: Hasher, SH: SpawnHandle> Consensus<H, SH> {
     pub(crate) fn new(
         conf: Config,
+        spawn_handle: SH,
         incoming_notifications: Receiver<NotificationIn<H>>,
         outgoing_notifications: Sender<NotificationOut<H>>,
         ordered_batch_tx: Sender<OrderedBatch<H::Hash>>,
     ) -> Self {
         Consensus {
             conf,
+            spawn_handle,
             incoming_notifications,
             outgoing_notifications,
             ordered_batch_tx,
         }
     }
 
-    pub(crate) async fn run(self, spawn_handle: impl SpawnHandle, mut exit: oneshot::Receiver<()>) {
+    pub(crate) async fn run(self, mut exit: oneshot::Receiver<()>) {
         info!(target: "AlephBFT", "{:?} Starting all services...", self.conf.node_ix);
 
         let n_members = self.conf.n_members;
@@ -48,7 +51,8 @@ impl<H: Hasher> Consensus<H> {
             self.ordered_batch_tx,
         );
         let (extender_exit, exit_rx) = oneshot::channel();
-        let mut extender_handle = spawn_handle
+        let mut extender_handle = self
+            .spawn_handle
             .spawn_essential("consensus/extender", async move {
                 extender.extend(exit_rx).await
             })
@@ -59,7 +63,8 @@ impl<H: Hasher> Consensus<H> {
         let mut creator = Creator::new(self.conf.clone(), parents_rx, new_units_tx);
 
         let (creator_exit, exit_rx) = oneshot::channel();
-        let mut creator_handle = spawn_handle
+        let mut creator_handle = self
+            .spawn_handle
             .spawn_essential(
                 "consensus/creator",
                 async move { creator.create(exit_rx).await },
@@ -88,7 +93,8 @@ impl<H: Hasher> Consensus<H> {
         }));
 
         let (terminal_exit, exit_rx) = oneshot::channel();
-        let mut terminal_handle = spawn_handle
+        let mut terminal_handle = self
+            .spawn_handle
             .spawn_essential(
                 "consensus/terminal",
                 async move { terminal.run(exit_rx).await },

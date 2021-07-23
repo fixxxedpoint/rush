@@ -148,7 +148,7 @@ pub(crate) struct Alerter<'a, H: Hasher, D: Data, MK: MultiKeychain> {
     alerts_from_units: Receiver<Alert<H, D, MK::Signature>>,
     max_units_per_alert: usize,
     known_forkers: HashMap<NodeIndex, ForkProof<H, D, MK::Signature>>,
-    known_alerts: HashMap<H::Hash, Signed<'a, Alert<H, D, MK::Signature>, MK>>,
+    known_alerts: HashMap<H::Hash, Signed<Alert<H, D, MK::Signature>, MK>>,
     known_rmcs: HashMap<(NodeIndex, NodeIndex), H::Hash>,
     rmc: ReliableMulticast<'a, H::Hash, MK>,
     messages_from_rmc: Receiver<rmc::Message<H::Hash, MK::Signature, MK::PartialMultisignature>>,
@@ -162,7 +162,7 @@ pub(crate) struct AlertConfig {
 }
 
 impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
-    fn new(
+    pub(crate) fn new(
         keychain: &'a MK,
         messages_for_network: Sender<(
             AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
@@ -293,7 +293,7 @@ impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
     async fn rmc_alert(
         &mut self,
         forker: NodeIndex,
-        alert: Signed<'a, Alert<H, D, MK::Signature>, MK>,
+        alert: Signed<Alert<H, D, MK::Signature>, MK>,
     ) {
         let hash = alert.as_signable().hash();
         self.known_rmcs
@@ -394,7 +394,7 @@ impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
         }
     }
 
-    fn alert_confirmed(&mut self, multisigned: Multisigned<'a, H::Hash, MK>) {
+    fn alert_confirmed(&mut self, multisigned: Multisigned<H::Hash, MK>) {
         let alert = match self.known_alerts.get(multisigned.as_signable()) {
             Some(alert) => alert.as_signable(),
             None => {
@@ -425,7 +425,7 @@ impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
             .expect("Channel should be open")
     }
 
-    async fn run(&mut self, mut exit: oneshot::Receiver<()>) {
+    pub(crate) async fn run(mut self, mut exit: oneshot::Receiver<()>) {
         loop {
             futures::select! {
                 message = self.messages_from_network.next() => match message {

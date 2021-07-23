@@ -1,23 +1,24 @@
 use codec::{Decode, Encode};
 use futures::{
     channel::{mpsc, oneshot},
+    pin_mut,
+    stream::iter,
     FutureExt, StreamExt,
 };
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use rand::Rng;
 
 use crate::{
-    alerts::Alert,
     config::Config,
     network::{NetworkHub, Recipient},
     runway::{Runway, RunwayConfigBuilder},
     signed::Signature,
     units::{PreUnit, UncheckedSignedUnit, Unit, UnitCoord, UnitStore},
-    Data, DataIO, Hasher, Index, MultiKeychain, Network, NodeCount, NodeIndex, Sender, SpawnHandle,
+    Data, DataIO, Hasher, MultiKeychain, Network, NodeCount, NodeIndex, Sender, SpawnHandle,
 };
 
 use futures_timer::Delay;
-use std::{cmp::Ordering, collections::BinaryHeap, fmt::Debug, time};
+use std::{cmp::Ordering, collections::BinaryHeap, fmt::Debug, iter::repeat, time};
 
 /// A message concerning units, either about new units or some requests for them.
 #[derive(Debug, Encode, Decode, Clone)]
@@ -126,50 +127,48 @@ pub struct Member<'a, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
-    DP: DataIO<D>,
+    DP: DataIO<D> + Send,
     MK: MultiKeychain,
     SH: SpawnHandle,
 {
     config: Config,
     tx_consensus: Option<Sender<NotificationIn<H>>>,
-    data_io: DP,
+    data_io: Option<DP>,
     keybox: &'a MK,
-    store: UnitStore<'a, H, D, MK>,
+    store: UnitStore<H, D, MK>,
     requests: BinaryHeap<ScheduledTask<H>>,
     threshold: NodeCount,
     n_members: NodeCount,
     unit_messages_for_network: Option<Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>>,
-    alerts_for_alerter: Option<Sender<Alert<H, D, MK::Signature>>>,
     spawn_handle: SH,
     scheduled_units: Vec<UncheckedSignedUnit<H, D, MK::Signature>>,
 }
 
-impl<'a, H, D, DP, MK, SH> Member<'a, H, D, DP, MK, SH>
+impl<H, D, DP, MK, SH> Member<'static, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
-    DP: DataIO<D>,
+    DP: 'static + DataIO<D> + Send,
     MK: MultiKeychain,
     SH: SpawnHandle,
 {
     /// Create a new instance of the Member for a given session. Under the hood, the Member implementation
     /// makes an extensive use of asynchronous features of Rust, so creating a new Member doesn't start it.
     /// See [`Member::run_session`].
-    pub fn new(data_io: DP, keybox: &'a MK, config: Config, spawn_handle: SH) -> Self {
+    pub fn new(data_io: DP, keybox: &'static MK, config: Config, spawn_handle: SH) -> Self {
         let n_members = config.n_members;
         let threshold = (n_members * 2) / 3 + NodeCount(1);
         let max_round = config.max_round;
         Member {
             config,
             tx_consensus: None,
-            data_io,
+            data_io: Some(data_io),
             keybox,
             store: UnitStore::new(n_members, threshold, max_round),
             requests: BinaryHeap::new(),
             threshold,
             n_members,
             unit_messages_for_network: None,
-            alerts_for_alerter: None,
             spawn_handle,
             scheduled_units: Vec::new(),
         }
@@ -291,10 +290,12 @@ where
         let signed_unit = self
             .scheduled_units
             .get(index)
-            .expect("we store all scheduled units");
+            .expect("we store all scheduled units")
+            .clone();
+        let hash = signed_unit.as_signable().hash();
         let message = UnitMessage::<H, D, MK::Signature>::NewUnit(signed_unit.into());
         // TODO consider not using hash() here
-        trace!(target: "AlephBFT-member", "{:?} Sending a unit {:?} over network {:?}th time.", self.index(), signed_unit.hash(), multicast_number);
+        trace!(target: "AlephBFT-member", "{:?} Sending a unit {:?} over network {:?}th time.", self.index(), hash, multicast_number);
         self.broadcast_units(message);
         let delay = (self.config.delay_config.unit_broadcast_delay)(multicast_number);
         self.requests.push(ScheduledTask::new(
@@ -306,14 +307,28 @@ where
     fn on_unit_message_from_units(
         &mut self,
         message: UnitMessage<H, D, MK::Signature>,
-        recipient: Recipient,
+        recipient: Option<Recipient>,
     ) {
         match message {
             UnitMessage::NewUnit(u) => self.on_create(u),
             UnitMessage::RequestCoord(index, coord) => self.on_request_coord(index, coord),
-            UnitMessage::ResponseCoord(_) => self.send_unit_message(message, recipient),
+            UnitMessage::ResponseCoord(_) => match recipient {
+                Some(Recipient::Node(node_ix)) => {
+                    self.send_unit_message(message, node_ix);
+                }
+                _ => {
+                    warn!(target: "AlephBFT-member", "{:?} Missing Recipient for a ResponseCoord message..", self.index());
+                }
+            },
             UnitMessage::RequestParents(index, hash) => self.on_request_parents(index, hash),
-            UnitMessage::ResponseParents(_, _) => self.send_unit_message(message, recipient),
+            UnitMessage::ResponseParents(_, _) => match recipient {
+                Some(Recipient::Node(node_ix)) => {
+                    self.send_unit_message(message, node_ix);
+                }
+                _ => {
+                    warn!(target: "AlephBFT-member", "{:?} Missing Recipient for a ResponseParents message..", self.index());
+                }
+            },
         }
     }
 
@@ -326,18 +341,19 @@ where
         network: N,
         mut exit: oneshot::Receiver<()>,
     ) {
-        info!(target: "AlephBFT-member", "{:?} Spawning party for a session.", self.index());
+        let index = self.index();
+        info!(target: "AlephBFT-member", "{:?} Spawning party for a session.", index);
         let config = self.config.clone();
         let sh = self.spawn_handle.clone();
 
         let (alert_messages_for_alerter, alert_messages_from_network) = mpsc::unbounded();
         let (alert_messages_for_network, alert_messages_from_alerter) = mpsc::unbounded();
-        let (unit_messages_for_units, mut unit_messages_from_network) = mpsc::unbounded();
+        let (unit_messages_for_units, unit_messages_from_network) = mpsc::unbounded();
         let (unit_messages_for_network, unit_messages_from_units) = mpsc::unbounded();
-        let (unit_messages_for_network_proxy, unit_messages_from_units_proxy) = mpsc::unbounded();
+        self.unit_messages_for_network = Some(unit_messages_for_network);
         let (network_exit, exit_stream) = oneshot::channel();
-        info!(target: "AlephBFT-member", "{:?} Spawning network.", self.index());
-        let mut network_handle = self
+        info!(target: "AlephBFT-member", "{:?} Spawning network.", index);
+        let network_handle = self
             .spawn_handle
             .spawn_essential("member/network", async move {
                 NetworkHub::new(
@@ -350,32 +366,40 @@ where
                 .run(exit_stream)
                 .await
             })
-            .fuse();
+            .then(|_| async { iter(repeat(())) })
+            .flatten_stream();
+        pin_mut!(network_handle);
 
         let runway_config = RunwayConfigBuilder::build(
             config,
             self.keybox,
-            self.data_io,
-            self.spawn_handle,
+            self.data_io.take().unwrap(),
+            self.spawn_handle.clone(),
             alert_messages_for_network,
             alert_messages_from_network,
-            unit_messages_for_network_proxy,
             unit_messages_from_network,
         );
         let (runway_exit, exit_stream) = oneshot::channel();
-        let runway = Runway::new(runway_config, |unit_message| {});
-        let mut runway_handle = self
+        let (unit_messages_for_network_proxy, mut unit_messages_from_units_proxy) =
+            mpsc::unbounded();
+        let runway = Runway::new(runway_config, move |unit_message| {
+            unit_messages_for_network_proxy
+                .unbounded_send(unit_message)
+                .expect("proxy connection should be open");
+        });
+        let runway_handle = self
             .spawn_handle
             .spawn_essential("member/runway", async move {
                 runway.run(exit_stream).await;
-            });
+            })
+            .then(|_| async { iter(repeat(())) })
+            .flatten_stream();
+        pin_mut!(runway_handle);
 
         let ticker_delay = self.config.delay_config.tick_interval;
         let mut ticker = Delay::new(ticker_delay).fuse();
 
-        let mut network_exited = false;
-        let mut runway_exited = false;
-        info!(target: "AlephBFT-member", "{:?} Start routing messages from consensus to network", self.index());
+        info!(target: "AlephBFT-member", "{:?} Start routing messages from consensus to network", index);
         loop {
             futures::select! {
                 event = unit_messages_from_units_proxy.next() => match event {
@@ -383,20 +407,18 @@ where
                         self.on_unit_message_from_units(message, recipient);
                     },
                     None => {
-                        error!(target: "AlephBFT-member", "{:?} Unit message stream from Runway closed.", self.index());
+                        error!(target: "AlephBFT-member", "{:?} Unit message stream from Runway closed.", index);
                         break;
                     },
                 },
 
-                _ = &mut network_handle => {
-                    network_exited = true;
-                    debug!(target: "AlephBFT-member", "{:?} network task terminated early.", self.index());
+                _ = network_handle.next() => {
+                    debug!(target: "AlephBFT-member", "{:?} network task terminated early.", index);
                     break;
                 },
 
-                _ = &mut runway_handle => {
-                    runway_exited = true;
-                    debug!(target: "AlephBFT-member", "{:?} runway task terminated early.", self.index());
+                _ = runway_handle.next() => {
+                    debug!(target: "AlephBFT-member", "{:?} runway task terminated early.", index);
                     break;
                 },
 
@@ -408,14 +430,14 @@ where
                 _ = &mut exit => break,
             }
         }
-        info!(target: "AlephBFT-member", "{:?} Ending run.", self.index());
+        info!(target: "AlephBFT-member", "{:?} Ending run.", index);
 
         let _ = runway_exit.send(());
-        runway_handle.await.unwrap();
+        runway_handle.next().await.unwrap();
 
         let _ = network_exit.send(());
-        network_handle.await.unwrap();
+        network_handle.next().await.unwrap();
 
-        info!(target: "AlephBFT-member", "{:?} Run ended.", self.index());
+        info!(target: "AlephBFT-member", "{:?} Run ended.", index);
     }
 }

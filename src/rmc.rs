@@ -175,13 +175,13 @@ impl<T: Send + Sync + Clone> TaskScheduler<T> for DoublingDelayScheduler<T> {
 /// We refer to the documentation https://cardinal-cryptography.github.io/AlephBFT/reliable_broadcast.html
 /// for a high-level description of this protocol and how it is used for fork alerts.
 pub struct ReliableMulticast<'a, H: Signable + Hash, MK: MultiKeychain> {
-    hash_states: HashMap<H, PartiallyMultisigned<'a, H, MK>>,
+    hash_states: HashMap<H, PartiallyMultisigned<H, MK>>,
     network_rx: UnboundedReceiver<Message<H, MK::Signature, MK::PartialMultisignature>>,
     network_tx: UnboundedSender<Message<H, MK::Signature, MK::PartialMultisignature>>,
     keychain: &'a MK,
     scheduler: Box<dyn TaskScheduler<Task<H, MK>>>,
-    multisigned_hashes_tx: UnboundedSender<Multisigned<'a, H, MK>>,
-    multisigned_hashes_rx: UnboundedReceiver<Multisigned<'a, H, MK>>,
+    multisigned_hashes_tx: UnboundedSender<Multisigned<H, MK>>,
+    multisigned_hashes_rx: UnboundedReceiver<Multisigned<H, MK>>,
 }
 
 impl<'a, H: Signable + Hash + Eq + Clone + Debug, MK: MultiKeychain> ReliableMulticast<'a, H, MK> {
@@ -217,7 +217,7 @@ impl<'a, H: Signable + Hash + Eq + Clone + Debug, MK: MultiKeychain> ReliableMul
         self.scheduler.add_task(task);
     }
 
-    fn on_complete_multisignature(&mut self, multisigned: Multisigned<'a, H, MK>) {
+    fn on_complete_multisignature(&mut self, multisigned: Multisigned<H, MK>) {
         let hash = multisigned.as_signable().clone();
         self.hash_states.insert(
             hash,
@@ -281,7 +281,7 @@ impl<'a, H: Signable + Hash + Eq + Clone + Debug, MK: MultiKeychain> ReliableMul
     }
 
     /// Fetches final multisignature.
-    pub fn get_multisigned(&self, hash: &H) -> Option<Multisigned<'a, H, MK>> {
+    pub fn get_multisigned(&self, hash: &H) -> Option<Multisigned<H, MK>> {
         match self.hash_states.get(hash)? {
             PartiallyMultisigned::Complete { multisigned } => Some(multisigned.clone()),
             _ => None,
@@ -289,7 +289,7 @@ impl<'a, H: Signable + Hash + Eq + Clone + Debug, MK: MultiKeychain> ReliableMul
     }
 
     /// Perform underlying tasks until the multisignature for the hash of this instance is collected.
-    pub async fn next_multisigned_hash(&mut self) -> Multisigned<'a, H, MK> {
+    pub async fn next_multisigned_hash(&mut self) -> Multisigned<H, MK> {
         loop {
             futures::select! {
                 multisigned_hash = self.multisigned_hashes_rx.next() => {

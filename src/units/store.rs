@@ -5,9 +5,9 @@ use log::{trace, warn};
 /// to the Terminal. We refer to the documentation https://cardinal-cryptography.github.io/AlephBFT/internals.html
 /// Section 5.4 for a discussion of this component and the notion of "legit" units.
 
-pub(crate) struct UnitStore<'a, H: Hasher, D: Data, KB: KeyBox> {
-    by_coord: HashMap<UnitCoord, SignedUnit<'a, H, D, KB>>,
-    by_hash: HashMap<H::Hash, SignedUnit<'a, H, D, KB>>,
+pub(crate) struct UnitStore<H: Hasher, D: Data, KB: KeyBox> {
+    by_coord: HashMap<UnitCoord, SignedUnit<H, D, KB>>,
+    by_hash: HashMap<H::Hash, SignedUnit<H, D, KB>>,
     parents: HashMap<H::Hash, Vec<H::Hash>>,
     //this is the smallest r, such that round r-1 is saturated, i.e., it has at least threshold (~(2/3)N) units
     round_in_progress: Round,
@@ -15,11 +15,11 @@ pub(crate) struct UnitStore<'a, H: Hasher, D: Data, KB: KeyBox> {
     //the number of unique nodes that we hold units for a given round
     n_units_per_round: Vec<NodeCount>,
     is_forker: NodeMap<bool>,
-    legit_buffer: Vec<SignedUnit<'a, H, D, KB>>,
+    legit_buffer: Vec<SignedUnit<H, D, KB>>,
     max_round: Round,
 }
 
-impl<'a, H: Hasher, D: Data, KB: KeyBox> UnitStore<'a, H, D, KB> {
+impl<H: Hasher, D: Data, KB: KeyBox> UnitStore<H, D, KB> {
     pub(crate) fn new(n_nodes: NodeCount, threshold: NodeCount, max_round: Round) -> Self {
         UnitStore {
             by_coord: HashMap::new(),
@@ -35,11 +35,11 @@ impl<'a, H: Hasher, D: Data, KB: KeyBox> UnitStore<'a, H, D, KB> {
         }
     }
 
-    pub(crate) fn unit_by_coord(&self, coord: UnitCoord) -> Option<&SignedUnit<'a, H, D, KB>> {
+    pub(crate) fn unit_by_coord(&self, coord: UnitCoord) -> Option<&SignedUnit<H, D, KB>> {
         self.by_coord.get(&coord)
     }
 
-    pub(crate) fn unit_by_hash(&self, hash: &H::Hash) -> Option<&SignedUnit<'a, H, D, KB>> {
+    pub(crate) fn unit_by_hash(&self, hash: &H::Hash) -> Option<&SignedUnit<H, D, KB>> {
         self.by_hash.get(hash)
     }
 
@@ -52,7 +52,7 @@ impl<'a, H: Hasher, D: Data, KB: KeyBox> UnitStore<'a, H, D, KB> {
     }
 
     // Outputs new legit units that are supposed to be sent to Consensus and empties the buffer.
-    pub(crate) fn yield_buffer_units(&mut self) -> Vec<SignedUnit<'a, H, D, KB>> {
+    pub(crate) fn yield_buffer_units(&mut self) -> Vec<SignedUnit<H, D, KB>> {
         std::mem::take(&mut self.legit_buffer)
     }
 
@@ -77,7 +77,7 @@ impl<'a, H: Hasher, D: Data, KB: KeyBox> UnitStore<'a, H, D, KB> {
         }
     }
     // Outputs None if this is not a newly-discovered fork or Some(sv) where (su, sv) form a fork
-    pub(crate) fn is_new_fork(&self, fu: &FullUnit<H, D>) -> Option<SignedUnit<'a, H, D, KB>> {
+    pub(crate) fn is_new_fork(&self, fu: &FullUnit<H, D>) -> Option<SignedUnit<H, D, KB>> {
         if self.contains_hash(&fu.hash()) {
             return None;
         }
@@ -94,7 +94,7 @@ impl<'a, H: Hasher, D: Data, KB: KeyBox> UnitStore<'a, H, D, KB> {
 
     // Marks a node as a forker and outputs units in store of round <= round_in_progress created by this node.
     // The returned vector is sorted w.r.t. increasing rounds. Units of higher round created by this node are removed from store.
-    pub(crate) fn mark_forker(&mut self, forker: NodeIndex) -> Vec<SignedUnit<'a, H, D, KB>> {
+    pub(crate) fn mark_forker(&mut self, forker: NodeIndex) -> Vec<SignedUnit<H, D, KB>> {
         if self.is_forker[forker] {
             warn!(target: "AlephBFT-unit-store", "Trying to mark the node {:?} as forker for the second time.", forker);
         }
@@ -123,7 +123,7 @@ impl<'a, H: Hasher, D: Data, KB: KeyBox> UnitStore<'a, H, D, KB> {
         forkers_units
     }
 
-    pub(crate) fn add_unit(&mut self, su: SignedUnit<'a, H, D, KB>, alert: bool) {
+    pub(crate) fn add_unit(&mut self, su: SignedUnit<H, D, KB>, alert: bool) {
         let hash = su.as_signable().hash();
         let round = su.as_signable().round();
         let creator = su.as_signable().creator();
@@ -180,7 +180,7 @@ mod tests {
         NodeCount, NodeIndex, Round, Signed,
     };
 
-    async fn create_unit<'a>(
+    async fn create_unit(
         round: Round,
         node_idx: NodeIndex,
         count: NodeCount,
