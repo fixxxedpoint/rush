@@ -10,7 +10,10 @@ use crate::{
     Config, Data, DataIO, Hasher, Index, KeyBox, MultiKeychain, NodeCount, NodeIndex, OrderedBatch,
     Receiver, Sender, Signed, SpawnHandle,
 };
-use futures::channel::{mpsc, oneshot};
+use futures::{
+    channel::{mpsc, oneshot},
+    FutureExt,
+};
 use log::{debug, error, info, trace, warn};
 
 pub(crate) struct Runway<'a, H, D, MK, DP, NH, SH>
@@ -37,6 +40,7 @@ where
     data_io: DP,
     spawn_handle: SH,
     alerter: Alerter<'a, H, D, MK>,
+    consensus: Consensus<H>,
 }
 
 pub(crate) struct RunwayConfig<
@@ -152,6 +156,7 @@ where
             alerter: config.alerter.0,
             tx_consensus: config.consensus.2,
             rx_consensus: config.consensus.1,
+            consensus: config.consensus.0,
             data_io: config.data_io,
             unit_messages_for_network: config.unit_messages_for_network,
             unit_messages_from_network: config.unit_messages_from_network,
@@ -540,7 +545,30 @@ where
     }
 
     pub async fn run(mut self, mut exit: oneshot::Receiver<()>) {
+        info!(target: "AlephBFT-airstrip", "{:?} Airstrip starting.", self.index());
+
+        let (alerter_exit, exit_stream) = oneshot::channel();
+        let alerter_handle = self
+            .spawn_handle
+            .spawn_essential("runway/alerter", async move {
+                self.alerter.run(exit_stream).await;
+            })
+            .then(|_| async { 0.. })
+            .flatten_stream();
+
+        let (consensus_exit, exit_stream) = oneshot::channel();
+        let consensus_handle = self
+            .spawn_handle
+            .spawn_essential("runway/consensus", async move {
+                self.consensus.run(self.spawn_handle, exit_stream).await;
+            })
+            .then(|_| async { 0.. })
+            .flatten_stream();
+
+        let mut alerter_exited = false;
+        let mut consensus_exited = false;
         info!(target: "AlephBFT-airstrip", "{:?} Airstrip started.", self.index());
+
         loop {
             futures::select! {
                 notification = self.rx_consensus.next() => match notification {
@@ -574,10 +602,30 @@ where
                         break;
                     }
                 },
+
+                _ = &mut alerter_handle.next() => {
+                    debug!(target: "AlephBFT-runway", "{:?} alerter task terminated early.", self.index());
+                    break;
+                },
+
+                _ = &mut consensus_handle.next() => {
+                    debug!(target: "AlephBFT-runway", "{:?} consensus task terminated early.", self.index());
+                    break;
+                },
+
                 _ = &mut exit => break,
             }
             self.move_units_to_consensus();
         }
+
         info!(target: "AlephBFT-airstrip", "{:?} Ending run.", self.index());
+
+        let _ = consensus_exit.send(());
+        consensus_handle.next().await.unwrap();
+
+        let _ = alerter_exit.send(());
+        alerter_handle.next().await.unwrap();
+
+        info!(target: "AlephBFT-airstrip", "{:?} Run ended.", self.index());
     }
 }
