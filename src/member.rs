@@ -88,13 +88,13 @@ enum Task<H: Hasher> {
 }
 
 #[derive(Eq, PartialEq)]
-struct ScheduledTask<H: Hasher, D: Data, MK: MultiKeychain> {
-    task: Task<'a, H, D, MK>,
+struct ScheduledTask<H: Hasher> {
+    task: Task<H>,
     scheduled_time: time::Instant,
 }
 
-impl<'a, H: Hasher, D: Data, MK: MultiKeychain> ScheduledTask<'a, H, D, MK> {
-    fn new(task: Task<'a, H, D, MK>, scheduled_time: time::Instant) -> Self {
+impl<H: Hasher> ScheduledTask<H> {
+    fn new(task: Task<H>, scheduled_time: time::Instant) -> Self {
         ScheduledTask {
             task,
             scheduled_time,
@@ -102,14 +102,14 @@ impl<'a, H: Hasher, D: Data, MK: MultiKeychain> ScheduledTask<'a, H, D, MK> {
     }
 }
 
-impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Ord for ScheduledTask<'a, H, D, MK> {
+impl<H: Hasher> Ord for ScheduledTask<H> {
     fn cmp(&self, other: &Self) -> Ordering {
         // we want earlier times to come first when used in max-heap, hence the below:
         other.scheduled_time.cmp(&self.scheduled_time)
     }
 }
 
-impl<'a, H: Hasher, D: Data, MK: MultiKeychain> PartialOrd for ScheduledTask<'a, H, D, MK> {
+impl<H: Hasher> PartialOrd for ScheduledTask<H> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -140,7 +140,7 @@ where
     data_io: DP,
     keybox: &'a MK,
     store: UnitStore<'a, H, D, MK>,
-    requests: BinaryHeap<ScheduledTask<'a, H, D, MK>>,
+    requests: BinaryHeap<ScheduledTask<H>>,
     threshold: NodeCount,
     n_members: NodeCount,
     unit_messages_for_network: Option<Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>>,
@@ -188,22 +188,26 @@ where
             .expect("Channel to consensus should be open")
     }
 
-    async fn on_create_new(&mut self, u: PreUnit<H>) {
+    fn on_create(&mut self, u: UncheckedSignedUnit<H, D, MK::Signature>) {
+        let index = self.scheduled_units.len();
+        self.scheduled_units.push(u);
         let curr_time = time::Instant::now();
-        let task = ScheduledTask::new(Task::UnitMulticast(hash, 0), curr_time);
+        let task = ScheduledTask::new(Task::UnitMulticast(index, 0), curr_time);
         self.requests.push(task);
     }
 
-    async fn on_create(&mut self, u: PreUnit<H>) {
-        debug!(target: "AlephBFT-member", "{:?} On create notification.", self.index());
-        let data = self.data_io.get_data();
-        let full_unit = FullUnit::new(u, data, self.config.session_id);
-        let hash = full_unit.hash();
-        let signed_unit = Signed::sign(full_unit, self.keybox).await;
-        self.store.add_unit(signed_unit, false);
+    fn on_request_coord(&mut self, node: NodeIndex, coord: UnitCoord) {
+        trace!(target: "AlephBFT-member", "{:?} Dealing with missing coord notification {:?}.", self.index(), coord);
         let curr_time = time::Instant::now();
-        let task = ScheduledTask::new(Task::UnitMulticast(hash, 0), curr_time);
+        let task = ScheduledTask::new(Task::CoordRequest(coord), curr_time);
         self.requests.push(task);
+    }
+
+    fn on_request_parents(&mut self, index: NodeIndex, u_hash: H::Hash) {
+        let curr_time = time::Instant::now();
+        let task = ScheduledTask::new(Task::ParentsRequest(u_hash), curr_time);
+        self.requests.push(task);
+        self.trigger_tasks();
     }
 
     // Pulls tasks from the priority queue (sorted by scheduled time) and sends them to random peers
@@ -337,23 +341,6 @@ where
             let task = ScheduledTask::new(Task::ParentsRequest(u_hash), curr_time);
             self.requests.push(task);
             self.trigger_tasks();
-        }
-    }
-
-    async fn on_consensus_notification(&mut self, notification: NotificationOut<H>) {
-        match notification {
-            NotificationOut::CreatedPreUnit(pu) => {
-                self.on_create(pu).await;
-            }
-            NotificationOut::MissingUnits(coords) => {
-                self.on_missing_coords(coords);
-            }
-            NotificationOut::WrongControlHash(h) => {
-                self.on_wrong_control_hash(h);
-            }
-            NotificationOut::AddedToDag(h, p_hashes) => {
-                self.store.add_parents(h, p_hashes);
-            }
         }
     }
 
@@ -669,11 +656,11 @@ where
         recipient: Recipient,
     ) {
         match message {
-            UnitMessage::NewUnit(_) => todo!(),
-            UnitMessage::RequestCoord(_, _) => todo!(),
-            UnitMessage::ResponseCoord(_) => todo!(),
-            UnitMessage::RequestParents(_, _) => todo!(),
-            UnitMessage::ResponseParents(_, _) => todo!(),
+            UnitMessage::NewUnit(u) => self.on_create(u),
+            UnitMessage::RequestCoord(index, coord) => self.on_request_coord(index, coord),
+            UnitMessage::ResponseCoord(_) => self.send_unit_message(message, recipient),
+            UnitMessage::RequestParents(index, hash) => self.on_request_parents(index, hash),
+            UnitMessage::ResponseParents(_, _) => self.send_unit_message(message, recipient),
         }
     }
 
@@ -741,14 +728,6 @@ where
                         error!(target: "AlephBFT-member", "{:?} Unit message stream from Runway closed.", self.index());
                         break;
                     },
-                },
-
-                notification = rx_consensus.next() => match notification {
-                        Some(notification) => self.on_consensus_notification(notification).await,
-                        None => {
-                            error!(target: "AlephBFT-member", "{:?} Consensus notification stream closed.", self.index());
-                            break;
-                        }
                 },
 
                 notification = notifications_from_alerter.next() => match notification {
