@@ -1,9 +1,7 @@
-use std::iter::repeat;
-
 use crate::{
     alerts::{Alert, AlertConfig, AlertMessage, Alerter, ForkProof, ForkingNotification},
     consensus::Consensus,
-    member::{NotificationIn, NotificationOut, UnitMessage},
+    member::{into_infinite_stream, NotificationIn, NotificationOut, UnitMessage},
     network::Recipient,
     nodes::NodeMap,
     units::{
@@ -14,9 +12,6 @@ use crate::{
 };
 use futures::{
     channel::{mpsc, oneshot},
-    future::ready,
-    pin_mut,
-    stream::iter,
     FutureExt, StreamExt,
 };
 use log::{debug, error, info, trace, warn};
@@ -32,7 +27,6 @@ where
 {
     config: Config,
     store: UnitStore<H, D, MK>,
-    index: NodeIndex,
     keybox: &'a MK,
     alerts_for_alerter: Sender<Alert<H, D, MK::Signature>>,
     notifications_from_alerter: Receiver<ForkingNotification<H, D, MK::Signature>>,
@@ -76,7 +70,14 @@ pub(crate) struct RunwayConfig<
 pub(crate) struct RunwayConfigBuilder {}
 
 impl RunwayConfigBuilder {
-    pub(crate) fn build<H: Hasher, D: Data, MK: MultiKeychain, DP: DataIO<D>, SH: SpawnHandle>(
+    pub(crate) fn build<
+        'a,
+        H: Hasher,
+        D: Data,
+        MK: MultiKeychain,
+        DP: DataIO<D>,
+        SH: SpawnHandle,
+    >(
         config: Config,
         keychain: &'static MK,
         data_io: DP,
@@ -89,7 +90,7 @@ impl RunwayConfigBuilder {
             AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
         >,
         unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
-    ) -> RunwayConfig<'static, H, D, MK, DP, SH> {
+    ) -> RunwayConfig<'a, H, D, MK, DP, SH> {
         let (tx_consensus, consensus_stream) = mpsc::unbounded();
         let (consensus_sink, rx_consensus) = mpsc::unbounded();
         let (ordered_batch_tx, ordered_batch_rx) = mpsc::unbounded();
@@ -130,7 +131,7 @@ impl RunwayConfigBuilder {
     }
 }
 
-impl<H, D, MK, DP, NH, SH> Runway<'static, H, D, MK, DP, NH, SH>
+impl<'a, H, D, MK, DP, NH, SH> Runway<'a, H, D, MK, DP, NH, SH>
 where
     H: Hasher,
     D: Data,
@@ -143,11 +144,9 @@ where
         let n_members = config.config.n_members;
         let threshold = (n_members * 2) / 3 + NodeCount(1);
         let max_round = config.config.max_round;
-        let index = config.config.node_ix;
         Runway {
             config: config.config,
             store: UnitStore::new(n_members, threshold, max_round),
-            index,
             keybox: config.keybox,
             alerts_for_alerter: config.alerter.2,
             notifications_from_alerter: config.alerter.1,
@@ -537,7 +536,17 @@ where
             .collect();
         self.send_consensus_notification(NotificationIn::NewUnits(units_to_move))
     }
+}
 
+impl<H, D, MK, DP, NH, SH> Runway<'static, H, D, MK, DP, NH, SH>
+where
+    H: Hasher,
+    D: Data,
+    MK: MultiKeychain,
+    DP: DataIO<D>,
+    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
+    SH: SpawnHandle,
+{
     pub async fn run(mut self, mut exit: oneshot::Receiver<()>) {
         info!(target: "AlephBFT-airstrip", "{:?} Airstrip starting.", self.index());
 
@@ -548,10 +557,8 @@ where
             .spawn_handle
             .spawn_essential("runway/alerter", async move {
                 alerter.run(exit_stream).await;
-            })
-            .then(|_| ready(iter(repeat(()))))
-            .flatten_stream();
-        pin_mut!(alerter_handle);
+            });
+        let mut alerter_handle = into_infinite_stream(alerter_handle).fuse();
 
         let (consensus_exit, exit_stream) = oneshot::channel();
         let consensus = self.consensus.take().unwrap();
@@ -559,10 +566,8 @@ where
             .spawn_handle
             .spawn_essential("runway/consensus", async move {
                 consensus.run(exit_stream).await;
-            })
-            .then(|_| ready(iter(repeat(()))))
-            .flatten_stream();
-        pin_mut!(consensus_handle);
+            });
+        let mut consensus_handle = into_infinite_stream(consensus_handle).fuse();
 
         info!(target: "AlephBFT-airstrip", "{:?} Airstrip started.", index);
         loop {
@@ -599,12 +604,12 @@ where
                     }
                 },
 
-                _ = &mut alerter_handle.next() => {
+                _ = alerter_handle.next() => {
                     debug!(target: "AlephBFT-runway", "{:?} alerter task terminated early.", index);
                     break;
                 },
 
-                _ = &mut consensus_handle.next() => {
+                _ = consensus_handle.next() => {
                     debug!(target: "AlephBFT-runway", "{:?} consensus task terminated early.", index);
                     break;
                 },

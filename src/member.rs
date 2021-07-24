@@ -1,13 +1,3 @@
-use codec::{Decode, Encode};
-use futures::{
-    channel::{mpsc, oneshot},
-    pin_mut,
-    stream::iter,
-    FutureExt, StreamExt,
-};
-use log::{debug, error, info, trace, warn};
-use rand::Rng;
-
 use crate::{
     config::Config,
     network::{NetworkHub, Recipient},
@@ -16,9 +6,24 @@ use crate::{
     units::{PreUnit, UncheckedSignedUnit, Unit, UnitCoord, UnitStore},
     Data, DataIO, Hasher, MultiKeychain, Network, NodeCount, NodeIndex, Sender, SpawnHandle,
 };
-
+use codec::{Decode, Encode};
+use futures::{
+    channel::{
+        mpsc::{self, unbounded},
+        oneshot,
+    },
+    future::ready,
+    stream::iter,
+    Future, FutureExt, Stream, StreamExt,
+};
 use futures_timer::Delay;
+use log::{debug, error, info, trace, warn};
+use rand::Rng;
 use std::{cmp::Ordering, collections::BinaryHeap, fmt::Debug, iter::repeat, time};
+
+pub(crate) fn into_infinite_stream<F: Future>(f: F) -> impl Stream<Item = ()> {
+    f.then(|_| ready(iter(repeat(())))).flatten_stream()
+}
 
 /// A message concerning units, either about new units or some requests for them.
 #[derive(Debug, Encode, Decode, Clone)]
@@ -132,14 +137,12 @@ where
     SH: SpawnHandle,
 {
     config: Config,
-    tx_consensus: Option<Sender<NotificationIn<H>>>,
     data_io: Option<DP>,
     keybox: &'a MK,
     store: UnitStore<H, D, MK>,
     requests: BinaryHeap<ScheduledTask<H>>,
-    threshold: NodeCount,
     n_members: NodeCount,
-    unit_messages_for_network: Option<Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>>,
+    unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
     spawn_handle: SH,
     scheduled_units: Vec<UncheckedSignedUnit<H, D, MK::Signature>>,
 }
@@ -161,14 +164,12 @@ where
         let max_round = config.max_round;
         Member {
             config,
-            tx_consensus: None,
             data_io: Some(data_io),
             keybox,
             store: UnitStore::new(n_members, threshold, max_round),
             requests: BinaryHeap::new(),
-            threshold,
             n_members,
-            unit_messages_for_network: None,
+            unit_messages_for_network: unbounded().0,
             spawn_handle,
             scheduled_units: Vec::new(),
         }
@@ -182,14 +183,14 @@ where
         self.requests.push(task);
     }
 
-    fn on_request_coord(&mut self, node: NodeIndex, coord: UnitCoord) {
+    fn on_request_coord(&mut self, coord: UnitCoord) {
         trace!(target: "AlephBFT-member", "{:?} Dealing with missing coord notification {:?}.", self.index(), coord);
         let curr_time = time::Instant::now();
         let task = ScheduledTask::new(Task::CoordRequest(coord), curr_time);
         self.requests.push(task);
     }
 
-    fn on_request_parents(&mut self, index: NodeIndex, u_hash: H::Hash) {
+    fn on_request_parents(&mut self, u_hash: H::Hash) {
         let curr_time = time::Instant::now();
         let task = ScheduledTask::new(Task::ParentsRequest(u_hash), curr_time);
         self.requests.push(task);
@@ -227,21 +228,17 @@ where
     }
 
     fn index(&self) -> NodeIndex {
-        self.keybox.index()
+        self.config.node_ix
     }
 
     fn send_unit_message(&mut self, message: UnitMessage<H, D, MK::Signature>, peer_id: NodeIndex) {
         self.unit_messages_for_network
-            .as_ref()
-            .unwrap()
             .unbounded_send((message, Recipient::Node(peer_id)))
             .expect("Channel to network should be open")
     }
 
     fn broadcast_units(&mut self, message: UnitMessage<H, D, MK::Signature>) {
         self.unit_messages_for_network
-            .as_ref()
-            .unwrap()
             .unbounded_send((message, Recipient::Everyone))
             .expect("Channel to network should be open")
     }
@@ -311,22 +308,22 @@ where
     ) {
         match message {
             UnitMessage::NewUnit(u) => self.on_create(u),
-            UnitMessage::RequestCoord(index, coord) => self.on_request_coord(index, coord),
+            UnitMessage::RequestCoord(_, coord) => self.on_request_coord(coord),
             UnitMessage::ResponseCoord(_) => match recipient {
-                Some(Recipient::Node(node_ix)) => {
-                    self.send_unit_message(message, node_ix);
+                Some(Recipient::Node(peer_id)) => {
+                    self.send_unit_message(message, peer_id);
                 }
                 _ => {
-                    warn!(target: "AlephBFT-member", "{:?} Missing Recipient for a ResponseCoord message..", self.index());
+                    warn!(target: "AlephBFT-member", "{:?} Missing Recipient for a ResponseCoord message.", self.index());
                 }
             },
-            UnitMessage::RequestParents(index, hash) => self.on_request_parents(index, hash),
+            UnitMessage::RequestParents(_, hash) => self.on_request_parents(hash),
             UnitMessage::ResponseParents(_, _) => match recipient {
-                Some(Recipient::Node(node_ix)) => {
-                    self.send_unit_message(message, node_ix);
+                Some(Recipient::Node(peer_id)) => {
+                    self.send_unit_message(message, peer_id);
                 }
                 _ => {
-                    warn!(target: "AlephBFT-member", "{:?} Missing Recipient for a ResponseParents message..", self.index());
+                    warn!(target: "AlephBFT-member", "{:?} Missing Recipient for a ResponseParents message.", self.index());
                 }
             },
         }
@@ -344,13 +341,12 @@ where
         let index = self.index();
         info!(target: "AlephBFT-member", "{:?} Spawning party for a session.", index);
         let config = self.config.clone();
-        let sh = self.spawn_handle.clone();
 
         let (alert_messages_for_alerter, alert_messages_from_network) = mpsc::unbounded();
         let (alert_messages_for_network, alert_messages_from_alerter) = mpsc::unbounded();
         let (unit_messages_for_units, unit_messages_from_network) = mpsc::unbounded();
         let (unit_messages_for_network, unit_messages_from_units) = mpsc::unbounded();
-        self.unit_messages_for_network = Some(unit_messages_for_network);
+        self.unit_messages_for_network = unit_messages_for_network;
         let (network_exit, exit_stream) = oneshot::channel();
         info!(target: "AlephBFT-member", "{:?} Spawning network.", index);
         let network_handle = self
@@ -365,10 +361,8 @@ where
                 )
                 .run(exit_stream)
                 .await
-            })
-            .then(|_| async { iter(repeat(())) })
-            .flatten_stream();
-        pin_mut!(network_handle);
+            });
+        let mut network_handle = into_infinite_stream(network_handle).fuse();
 
         let runway_config = RunwayConfigBuilder::build(
             config,
@@ -391,10 +385,8 @@ where
             .spawn_handle
             .spawn_essential("member/runway", async move {
                 runway.run(exit_stream).await;
-            })
-            .then(|_| async { iter(repeat(())) })
-            .flatten_stream();
-        pin_mut!(runway_handle);
+            });
+        let mut runway_handle = into_infinite_stream(runway_handle).fuse();
 
         let ticker_delay = self.config.delay_config.tick_interval;
         let mut ticker = Delay::new(ticker_delay).fuse();
@@ -434,7 +426,6 @@ where
 
         let _ = runway_exit.send(());
         runway_handle.next().await.unwrap();
-
         let _ = network_exit.send(());
         network_handle.next().await.unwrap();
 
