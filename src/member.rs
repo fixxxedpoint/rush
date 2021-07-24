@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     network::{NetworkHub, Recipient},
-    runway::{Runway, RunwayConfigBuilder},
+    runway::Runway,
     signed::Signature,
     units::{PreUnit, UncheckedSignedUnit, Unit, UnitCoord, UnitStore},
     Data, DataIO, Hasher, MultiKeychain, Network, NodeCount, NodeIndex, Sender, SpawnHandle,
@@ -364,7 +364,10 @@ where
             });
         let mut network_handle = into_infinite_stream(network_handle).fuse();
 
-        let runway_config = RunwayConfigBuilder::build(
+        let (runway_exit, exit_stream) = oneshot::channel();
+        let (unit_messages_for_network_proxy, mut unit_messages_from_units_proxy) =
+            mpsc::unbounded();
+        let runway = Runway::new(
             config,
             self.keybox,
             self.data_io.take().unwrap(),
@@ -372,15 +375,12 @@ where
             alert_messages_for_network,
             alert_messages_from_network,
             unit_messages_from_network,
+            move |unit_message| {
+                unit_messages_for_network_proxy
+                    .unbounded_send(unit_message)
+                    .expect("proxy connection should be open");
+            },
         );
-        let (runway_exit, exit_stream) = oneshot::channel();
-        let (unit_messages_for_network_proxy, mut unit_messages_from_units_proxy) =
-            mpsc::unbounded();
-        let runway = Runway::new(runway_config, move |unit_message| {
-            unit_messages_for_network_proxy
-                .unbounded_send(unit_message)
-                .expect("proxy connection should be open");
-        });
         let runway_handle = self
             .spawn_handle
             .spawn_essential("member/runway", async move {

@@ -12,7 +12,7 @@ use crate::{
 };
 use futures::{
     channel::{mpsc, oneshot},
-    FutureExt, StreamExt,
+    StreamExt,
 };
 use log::{debug, error, info, trace, warn};
 
@@ -41,45 +41,18 @@ where
     consensus: Option<Consensus<H, SH>>,
 }
 
-pub(crate) struct RunwayConfig<
-    'a,
+impl<'a, H, D, MK, DP, NH, SH> Runway<'a, H, D, MK, DP, NH, SH>
+where
     H: Hasher,
     D: Data,
     MK: MultiKeychain,
     DP: DataIO<D>,
+    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
     SH: SpawnHandle,
-> {
-    config: Config,
-    data_io: DP,
-    keybox: &'a MK,
-    spawn_handle: SH,
-    alerter: (
-        Alerter<'static, H, D, MK>,
-        Receiver<ForkingNotification<H, D, MK::Signature>>,
-        Sender<Alert<H, D, MK::Signature>>,
-    ),
-    consensus: (
-        Consensus<H, SH>,
-        Sender<NotificationIn<H>>,
-        Receiver<NotificationOut<H>>,
-        Receiver<OrderedBatch<H::Hash>>,
-    ),
-    unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
-}
-
-pub(crate) struct RunwayConfigBuilder {}
-
-impl RunwayConfigBuilder {
-    pub(crate) fn build<
-        'a,
-        H: Hasher,
-        D: Data,
-        MK: MultiKeychain,
-        DP: DataIO<D>,
-        SH: SpawnHandle,
-    >(
+{
+    pub(crate) fn new(
         config: Config,
-        keychain: &'static MK,
+        keychain: &'a MK,
         data_io: DP,
         spawn_handle: SH,
         alert_messages_for_network: Sender<(
@@ -90,7 +63,8 @@ impl RunwayConfigBuilder {
             AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
         >,
         unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
-    ) -> RunwayConfig<'a, H, D, MK, DP, SH> {
+        handler: NH,
+    ) -> Self {
         let (tx_consensus, consensus_stream) = mpsc::unbounded();
         let (consensus_sink, rx_consensus) = mpsc::unbounded();
         let (ordered_batch_tx, ordered_batch_rx) = mpsc::unbounded();
@@ -119,45 +93,23 @@ impl RunwayConfigBuilder {
             ordered_batch_tx,
         );
 
-        RunwayConfig {
-            config,
-            data_io,
-            keybox: keychain,
-            spawn_handle,
-            alerter: (alerter, notifications_from_alerter, alerts_for_alerter),
-            consensus: (consensus, tx_consensus, rx_consensus, ordered_batch_rx),
-            unit_messages_from_network,
-        }
-    }
-}
-
-impl<'a, H, D, MK, DP, NH, SH> Runway<'a, H, D, MK, DP, NH, SH>
-where
-    H: Hasher,
-    D: Data,
-    MK: MultiKeychain,
-    DP: DataIO<D>,
-    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
-    SH: SpawnHandle,
-{
-    pub(crate) fn new(config: RunwayConfig<'static, H, D, MK, DP, SH>, handler: NH) -> Self {
-        let n_members = config.config.n_members;
+        let n_members = config.n_members;
         let threshold = (n_members * 2) / 3 + NodeCount(1);
-        let max_round = config.config.max_round;
+        let max_round = config.max_round;
         Runway {
-            config: config.config,
+            config,
             store: UnitStore::new(n_members, threshold, max_round),
-            keybox: config.keybox,
-            alerts_for_alerter: config.alerter.2,
-            notifications_from_alerter: config.alerter.1,
-            alerter: Some(config.alerter.0),
-            tx_consensus: config.consensus.1,
-            rx_consensus: config.consensus.2,
-            consensus: Some(config.consensus.0),
-            data_io: config.data_io,
-            unit_messages_from_network: config.unit_messages_from_network,
-            spawn_handle: config.spawn_handle,
-            ordered_batch_rx: config.consensus.3,
+            keybox: keychain,
+            alerts_for_alerter,
+            notifications_from_alerter,
+            alerter: Some(alerter),
+            tx_consensus,
+            rx_consensus,
+            consensus: Some(consensus),
+            data_io,
+            unit_messages_from_network,
+            spawn_handle,
+            ordered_batch_rx,
             notification_handler: handler,
         }
     }
@@ -623,7 +575,6 @@ where
 
         let _ = consensus_exit.send(());
         consensus_handle.next().await.unwrap();
-
         let _ = alerter_exit.send(());
         alerter_handle.next().await.unwrap();
 
