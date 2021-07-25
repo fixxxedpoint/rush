@@ -19,7 +19,13 @@ use futures::{
 use futures_timer::Delay;
 use log::{debug, error, info, trace, warn};
 use rand::Rng;
-use std::{cmp::Ordering, collections::BinaryHeap, fmt::Debug, iter::repeat, time};
+use std::{
+    cmp::Ordering,
+    collections::{BinaryHeap, HashSet},
+    fmt::Debug,
+    iter::repeat,
+    time,
+};
 
 pub(crate) fn into_infinite_stream<F: Future>(f: F) -> impl Stream<Item = ()> {
     f.then(|_| ready(iter(repeat(())))).flatten_stream()
@@ -139,12 +145,13 @@ where
     config: Config,
     data_io: Option<DP>,
     keybox: &'a MK,
-    store: UnitStore<H, D, MK>,
     requests: BinaryHeap<ScheduledTask<H>>,
     n_members: NodeCount,
     unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
     spawn_handle: SH,
     scheduled_units: Vec<UncheckedSignedUnit<H, D, MK::Signature>>,
+    coord_requests: HashSet<UnitCoord>,
+    parents_requests: HashSet<H::Hash>,
 }
 
 impl<H, D, DP, MK, SH> Member<'static, H, D, DP, MK, SH>
@@ -166,12 +173,13 @@ where
             config,
             data_io: Some(data_io),
             keybox,
-            store: UnitStore::new(n_members, threshold, max_round),
             requests: BinaryHeap::new(),
             n_members,
             unit_messages_for_network: unbounded().0,
             spawn_handle,
             scheduled_units: Vec::new(),
+            coord_requests: HashSet::new(),
+            parents_requests: HashSet::new(),
         }
     }
 
@@ -185,12 +193,15 @@ where
 
     fn on_request_coord(&mut self, coord: UnitCoord) {
         trace!(target: "AlephBFT-member", "{:?} Dealing with missing coord notification {:?}.", self.index(), coord);
+        self.coord_requests.insert(coord);
         let curr_time = time::Instant::now();
         let task = ScheduledTask::new(Task::CoordRequest(coord), curr_time);
         self.requests.push(task);
+        self.trigger_tasks();
     }
 
     fn on_request_parents(&mut self, u_hash: H::Hash) {
+        self.parents_requests.insert(u_hash);
         let curr_time = time::Instant::now();
         let task = ScheduledTask::new(Task::ParentsRequest(u_hash), curr_time);
         self.requests.push(task);
@@ -244,7 +255,7 @@ where
     }
 
     fn schedule_parents_request(&mut self, u_hash: H::Hash, curr_time: time::Instant) {
-        if self.store.get_parents(u_hash).is_none() {
+        if self.parents_requests.contains(&u_hash) {
             let message = UnitMessage::<H, D, MK::Signature>::RequestParents(self.index(), u_hash);
             let peer_id = self.random_peer();
             self.send_unit_message(message, peer_id);
@@ -261,9 +272,9 @@ where
 
     fn schedule_coord_request(&mut self, coord: UnitCoord, curr_time: time::Instant) {
         trace!(target: "AlephBFT-member", "{:?} Starting request for {:?}", self.index(), coord);
-        // If we already have a unit with such a coord in our store then there is no need to request it.
+        // If we already received or never asked for such coord then there is no need to request it.
         // It will be sent to consensus soon (or have already been sent).
-        if self.store.contains_coord(&coord) {
+        if !self.coord_requests.contains(&coord) {
             trace!(target: "AlephBFT-member", "{:?} Request dropped as the unit is in store already {:?}", self.index(), coord);
             return;
         }
@@ -329,6 +340,37 @@ where
         }
     }
 
+    fn on_unit_message_from_network(
+        &mut self,
+        message: UnitMessage<H, D, MK::Signature>,
+        proxy: &mut Sender<UnitMessage<H, D, MK::Signature>>,
+    ) {
+        let mut requested = false;
+        match message {
+            UnitMessage::ResponseCoord(ref unit) => {
+                // TODO refactor to a separate method
+                // stop sending requests for which we received some answer
+                // if response is invalid, we will receive another request for it
+                requested = self.coord_requests.remove(&unit.as_signable().coord());
+            }
+            UnitMessage::ResponseParents(ref hash, _) => {
+                // TODO refactor to a separate method
+                // stop sending requests for which we received some answer
+                // if response is invalid, we will receive another request for it
+                requested = self.parents_requests.remove(hash);
+            }
+            _ => {}
+        }
+        // if requested {
+        //     proxy
+        //         .unbounded_send(message)
+        //         .expect("proxy should not be closed");
+        // }
+        proxy
+            .unbounded_send(message)
+            .expect("proxy should not be closed");
+    }
+
     /// Actually start the Member as an async task. It stops establishing consensus for new data items after
     /// reaching the threshold specified in [`Config::max_round`] or upon receiving a stop signal from `exit`.
     pub async fn run_session<
@@ -344,7 +386,7 @@ where
 
         let (alert_messages_for_alerter, alert_messages_from_network) = mpsc::unbounded();
         let (alert_messages_for_network, alert_messages_from_alerter) = mpsc::unbounded();
-        let (unit_messages_for_units, unit_messages_from_network) = mpsc::unbounded();
+        let (unit_messages_for_units, mut unit_messages_from_network) = mpsc::unbounded();
         let (unit_messages_for_network, unit_messages_from_units) = mpsc::unbounded();
         self.unit_messages_for_network = unit_messages_for_network;
         let (network_exit, exit_stream) = oneshot::channel();
@@ -367,6 +409,8 @@ where
         let (runway_exit, exit_stream) = oneshot::channel();
         let (unit_messages_for_network_proxy, mut unit_messages_from_units_proxy) =
             mpsc::unbounded();
+        let (mut unit_messages_for_units_proxy, unit_messages_from_network_proxy) =
+            mpsc::unbounded();
         let runway = Runway::new(
             config,
             self.keybox,
@@ -374,7 +418,7 @@ where
             self.spawn_handle.clone(),
             alert_messages_for_network,
             alert_messages_from_network,
-            unit_messages_from_network,
+            unit_messages_from_network_proxy,
             move |unit_message| {
                 unit_messages_for_network_proxy
                     .unbounded_send(unit_message)
@@ -400,6 +444,17 @@ where
                     },
                     None => {
                         error!(target: "AlephBFT-member", "{:?} Unit message stream from Runway closed.", index);
+                        break;
+                    },
+                },
+
+                event = unit_messages_from_network.next() => match event {
+                    Some(message) => {
+                        todo!("process all responses");
+                        self.on_unit_message_from_network(message, &mut unit_messages_for_units_proxy);
+                    },
+                    None => {
+                        error!(target: "AlephBFT-member", "{:?} Unit message stream from network closed.", index);
                         break;
                     },
                 },
