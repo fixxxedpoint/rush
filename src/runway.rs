@@ -1,14 +1,14 @@
 use crate::{
     alerts::{Alert, AlertConfig, AlertMessage, Alerter, ForkProof, ForkingNotification},
     consensus::Consensus,
-    member::{into_infinite_stream, NotificationIn, NotificationOut, UnitMessage},
+    member::{into_infinite_stream, NotificationIn, NotificationOut, Task, UnitMessage},
     network::Recipient,
     nodes::NodeMap,
     units::{
         ControlHash, FullUnit, PreUnit, SignedUnit, UncheckedSignedUnit, UnitCoord, UnitStore,
     },
     Config, Data, DataIO, Hasher, Index, MultiKeychain, NodeCount, NodeIndex, OrderedBatch,
-    Receiver, Sender, Signed, SpawnHandle,
+    Receiver, Sender, Signature, Signed, SpawnHandle,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -16,13 +16,23 @@ use futures::{
 };
 use log::{debug, error, info, trace, warn};
 
+// pub(crate) struct Request<H: Hasher, D: Data, S: Signature> {
+//     msg: UnitMessage<H, D, S>,
+// }
+
+// impl<H: Hasher, D: Data, S: Signature> Request<H, D, S> {
+//     pub(crate) fn message(&self) -> &UnitMessage<H, D, S> {
+//         &self.msg
+//     }
+// }
+
 pub(crate) struct Runway<'a, H, D, MK, DP, NH, SH>
 where
     H: Hasher,
     D: Data,
     MK: MultiKeychain,
     DP: DataIO<D>,
-    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
+    NH: FnMut((Task<H>, Option<Recipient>)),
     SH: SpawnHandle,
 {
     config: Config,
@@ -111,6 +121,14 @@ where
             spawn_handle,
             ordered_batch_rx,
             notification_handler: handler,
+        }
+    }
+
+    pub(crate) fn is_done(&self, request: &Task<H>) -> bool {
+        match request {
+            Task::CoordRequest(coord) => self.store.contains_coord(coord),
+            Task::ParentsRequest(u_hash) => self.store.get_parents(*u_hash).is_none(),
+            _ => false,
         }
     }
 
@@ -521,7 +539,7 @@ where
     NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
     SH: SpawnHandle,
 {
-    pub async fn run(mut self, mut exit: oneshot::Receiver<()>) {
+    pub async fn run(&mut self, mut exit: oneshot::Receiver<()>) {
         todo!("runway nie powinnien byc odpalany w osobnym watku od membera, tylko dzialac w tym samym i udostepniac wygodny interfejs dla niego");
         info!(target: "AlephBFT-airstrip", "{:?} Airstrip starting.", self.index());
 

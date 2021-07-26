@@ -87,7 +87,7 @@ pub(crate) enum NotificationOut<H: Hasher> {
 }
 
 #[derive(Eq, PartialEq)]
-enum Task<H: Hasher> {
+pub(crate) enum Task<H: Hasher> {
     CoordRequest(UnitCoord),
     ParentsRequest(H::Hash),
     //The index of a unit in our local store, and the number of this multicast (i.e., how many times was the unit multicast already).
@@ -134,12 +134,13 @@ impl<H: Hasher> PartialOrd for ScheduledTask<H> {
 /// For a detailed description of the consensus implemented in Member see
 /// [docs for devs](https://cardinal-cryptography.github.io/AlephBFT/index.html)
 /// or the [original paper](https://arxiv.org/abs/1908.05156).
-pub struct Member<'a, H, D, DP, MK, SH>
+pub struct Member<'a, H, D, DP, MK, NH, SH>
 where
     H: Hasher,
     D: Data,
     DP: DataIO<D> + Send,
     MK: MultiKeychain,
+    NH: FnMut((Task<H>, Option<Recipient>)),
     SH: SpawnHandle,
 {
     config: Config,
@@ -147,11 +148,94 @@ where
     keybox: &'a MK,
     requests: BinaryHeap<ScheduledTask<H>>,
     n_members: NodeCount,
-    unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
     spawn_handle: SH,
     scheduled_units: Vec<UncheckedSignedUnit<H, D, MK::Signature>>,
     coord_requests: HashSet<UnitCoord>,
     parents_requests: HashSet<H::Hash>,
+}
+
+struct RunningMember<'a, H, D, DP, MK, NH, SH>
+where
+    H: Hasher,
+    D: Data,
+    DP: DataIO<D> + Send,
+    MK: MultiKeychain,
+    NH: FnMut((Task<H>, Option<Recipient>)),
+    SH: SpawnHandle,
+{
+    member: Member<'a, H, D, DP, MK, NH, SH>,
+    runway: Runway<'a, H, D, MK, DP, NH, SH>,
+    unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
+}
+
+impl<'a, H, D, DP, MK, NH, SH> RunningMember<'a, H, D, DP, MK, NH, SH>
+where
+    H: Hasher,
+    D: Data,
+    DP: DataIO<D> + Send,
+    MK: MultiKeychain,
+    NH: FnMut((Task<H>, Option<Recipient>)),
+    SH: SpawnHandle,
+{
+    fn new(
+        member: Member<'a, H, D, DP, MK, NH, SH>,
+        runway: Runway<'a, H, D, MK, DP, NH, SH>,
+        unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
+    ) -> Self {
+        Self {
+            member,
+            runway,
+            unit_messages_for_network,
+        }
+    }
+
+    async fn run<N: Network<H, D, MK::Signature, MK::PartialMultisignature> + 'static>(
+        mut self,
+        network: N,
+        mut exit: oneshot::Receiver<()>,
+    ) {
+        loop {
+            futures::select! {
+                event = unit_messages_from_units_proxy.next() => match event {
+                    Some((message, recipient)) => {
+                        self.on_unit_message_from_units(message, recipient);
+                    },
+                    None => {
+                        error!(target: "AlephBFT-member", "{:?} Unit message stream from Runway closed.", index);
+                        break;
+                    },
+                },
+
+                event = unit_messages_from_network.next() => match event {
+                    Some(message) => {
+                        todo!("process all responses");
+                        self.on_unit_message_from_network(message, &mut unit_messages_for_units_proxy);
+                    },
+                    None => {
+                        error!(target: "AlephBFT-member", "{:?} Unit message stream from network closed.", index);
+                        break;
+                    },
+                },
+
+                _ = network_handle.next() => {
+                    debug!(target: "AlephBFT-member", "{:?} network task terminated early.", index);
+                    break;
+                },
+
+                _ = runway_handle.next() => {
+                    debug!(target: "AlephBFT-member", "{:?} runway task terminated early.", index);
+                    break;
+                },
+
+                _ = &mut ticker => {
+                    self.trigger_tasks();
+                    ticker = Delay::new(ticker_delay).fuse();
+                },
+
+                _ = &mut exit => break,
+            }
+        }
+    }
 }
 
 impl<H, D, DP, MK, SH> Member<'static, H, D, DP, MK, SH>
@@ -175,7 +259,6 @@ where
             keybox,
             requests: BinaryHeap::new(),
             n_members,
-            unit_messages_for_network: unbounded().0,
             spawn_handle,
             scheduled_units: Vec::new(),
             coord_requests: HashSet::new(),
@@ -388,7 +471,7 @@ where
         let (alert_messages_for_network, alert_messages_from_alerter) = mpsc::unbounded();
         let (unit_messages_for_units, mut unit_messages_from_network) = mpsc::unbounded();
         let (unit_messages_for_network, unit_messages_from_units) = mpsc::unbounded();
-        self.unit_messages_for_network = unit_messages_for_network;
+        // self.unit_messages_for_network = unit_messages_for_network;
         let (network_exit, exit_stream) = oneshot::channel();
         info!(target: "AlephBFT-member", "{:?} Spawning network.", index);
         let network_handle = self
@@ -425,6 +508,7 @@ where
                     .expect("proxy connection should be open");
             },
         );
+        let runing_member = RunningMember::new(self, runway, unit_messages_for_network);
         let runway_handle = self
             .spawn_handle
             .spawn_essential("member/runway", async move {
