@@ -32,7 +32,7 @@ where
     D: Data,
     MK: MultiKeychain,
     DP: DataIO<D>,
-    NH: FnMut((Task<H>, Option<Recipient>)),
+    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
     SH: SpawnHandle,
 {
     config: Config,
@@ -130,6 +130,14 @@ where
             Task::ParentsRequest(u_hash) => self.store.get_parents(*u_hash).is_none(),
             _ => false,
         }
+    }
+
+    pub(crate) fn missing_parents(&self, u_hash: &H::Hash) -> bool {
+        self.store.get_parents(*u_hash).is_none()
+    }
+
+    pub(crate) fn missing_coords(&self, coord: &UnitCoord) -> bool {
+        !self.store.contains_coord(coord)
     }
 
     fn index(&self) -> NodeIndex {
@@ -539,7 +547,7 @@ where
     NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
     SH: SpawnHandle,
 {
-    pub async fn run(&mut self, mut exit: oneshot::Receiver<()>) {
+    pub async fn run(&mut self, exit: oneshot::Receiver<()>) {
         todo!("runway nie powinnien byc odpalany w osobnym watku od membera, tylko dzialac w tym samym i udostepniac wygodny interfejs dla niego");
         info!(target: "AlephBFT-airstrip", "{:?} Airstrip starting.", self.index());
 
