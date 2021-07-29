@@ -156,8 +156,6 @@ where
     /// See [`Member::run_session`].
     pub fn new(data_io: DP, keybox: &'static MK, config: Config, spawn_handle: SH) -> Self {
         let n_members = config.n_members;
-        let threshold = (n_members * 2) / 3 + NodeCount(1);
-        let max_round = config.max_round;
         Member {
             config,
             data_io: Some(data_io),
@@ -170,7 +168,7 @@ where
     }
 }
 
-struct RunningMember<'a, H, D, DP, MK, SH>
+struct InitializedMember<'a, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
@@ -186,7 +184,7 @@ where
     unit_messages_for_units_proxy: Sender<UnitMessage<H, D, MK::Signature>>,
 }
 
-impl<'a, H, D, DP, MK, SH> RunningMember<'a, H, D, DP, MK, SH>
+impl<'a, H, D, DP, MK, SH> InitializedMember<'a, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
@@ -216,7 +214,7 @@ where
     }
 }
 
-impl<H, D, DP, MK, SH> RunningMember<'static, H, D, DP, MK, SH>
+impl<H, D, DP, MK, SH> InitializedMember<'static, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
@@ -284,10 +282,19 @@ where
                 _ = &mut exit => break,
             }
         }
+        if runway_exit.send(()).is_err() {
+            debug!(target: "AlephBFT-member", "{:?} runway already stopped.", index);
+        }
+        runway_handle.next().await.unwrap();
+        if network_exit.send(()).is_err() {
+            debug!(target: "AlephBFT-member", "{:?} network already stopped.", index);
+        }
+        network_handle.next().await.unwrap();
+        debug!(target: "AlephBFT-member", "{:?} InitializedMember stopped.", index);
     }
 }
 
-impl<'a, H, D, DP, MK, SH> RunningMember<'a, H, D, DP, MK, SH>
+impl<'a, H, D, DP, MK, SH> InitializedMember<'a, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
@@ -450,16 +457,6 @@ where
             },
         }
     }
-
-    fn on_unit_message_from_network(
-        &mut self,
-        message: UnitMessage<H, D, MK::Signature>,
-        proxy: &mut Sender<UnitMessage<H, D, MK::Signature>>,
-    ) {
-        proxy
-            .unbounded_send(message)
-            .expect("proxy should not be closed");
-    }
 }
 
 impl<H, D, DP, MK, SH> Member<'static, H, D, DP, MK, SH>
@@ -499,7 +496,7 @@ where
         let (unit_messages_for_network_proxy, unit_messages_from_units_proxy) = mpsc::unbounded();
         let (unit_messages_for_units_proxy, unit_messages_from_network_proxy) = mpsc::unbounded();
 
-        let (runway, request_checker) = Runway::new(
+        let mut runway = Runway::new(
             config,
             self.keybox,
             self.data_io.take().unwrap(),
@@ -513,8 +510,9 @@ where
                     .expect("proxy connection should be open");
             },
         );
+        let request_checker = runway.create_request_checker();
 
-        let mut running_member = RunningMember::new(
+        let initialized_member = InitializedMember::new(
             self,
             request_checker,
             unit_messages_for_network,
@@ -523,7 +521,7 @@ where
             unit_messages_for_units_proxy,
         );
 
-        running_member.run(network_hub, runway, exit).await;
+        initialized_member.run(network_hub, runway, exit).await;
 
         info!(target: "AlephBFT-member", "{:?} Run ended.", index);
     }

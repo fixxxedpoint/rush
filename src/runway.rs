@@ -3,30 +3,20 @@ use std::{cell::RefCell, rc::Rc};
 use crate::{
     alerts::{Alert, AlertConfig, AlertMessage, Alerter, ForkProof, ForkingNotification},
     consensus::Consensus,
-    member::{into_infinite_stream, NotificationIn, NotificationOut, Task, UnitMessage},
+    member::{into_infinite_stream, NotificationIn, NotificationOut, UnitMessage},
     network::Recipient,
     nodes::NodeMap,
     units::{
         ControlHash, FullUnit, PreUnit, SignedUnit, UncheckedSignedUnit, UnitCoord, UnitStore,
     },
     Config, Data, DataIO, Hasher, Index, MultiKeychain, NodeCount, NodeIndex, OrderedBatch,
-    Receiver, Sender, Signature, Signed, SpawnHandle,
+    Receiver, Sender, Signed, SpawnHandle,
 };
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt,
 };
 use log::{debug, error, info, trace, warn};
-
-// pub(crate) struct Request<H: Hasher, D: Data, S: Signature> {
-//     msg: UnitMessage<H, D, S>,
-// }
-
-// impl<H: Hasher, D: Data, S: Signature> Request<H, D, S> {
-//     pub(crate) fn message(&self) -> &UnitMessage<H, D, S> {
-//         &self.msg
-//     }
-// }
 
 pub(crate) struct RequestChecker<H, D, MK>
 where
@@ -38,6 +28,10 @@ where
 }
 
 impl<H: Hasher, D: Data, MK: MultiKeychain> RequestChecker<H, D, MK> {
+    fn new(store: Rc<RefCell<UnitStore<H, D, MK>>>) -> Self {
+        RequestChecker { store }
+    }
+
     pub(crate) fn missing_parents(&self, u_hash: &H::Hash) -> bool {
         self.store.borrow().get_parents(*u_hash).is_none()
     }
@@ -95,7 +89,7 @@ where
         >,
         unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
         handler: NH,
-    ) -> (Self, RequestChecker<H, D, MK>) {
+    ) -> Self {
         let (tx_consensus, consensus_stream) = mpsc::unbounded();
         let (consensus_sink, rx_consensus) = mpsc::unbounded();
         let (ordered_batch_tx, ordered_batch_rx) = mpsc::unbounded();
@@ -130,32 +124,30 @@ where
         let store = Rc::new(RefCell::new(UnitStore::new(
             n_members, threshold, max_round,
         )));
-        let req_checker = RequestChecker {
-            store: store.clone(),
-        };
-        (
-            Runway {
-                config,
-                store,
-                keybox: keychain,
-                alerts_for_alerter,
-                notifications_from_alerter,
-                alerter: Some(alerter),
-                tx_consensus,
-                rx_consensus,
-                consensus: Some(consensus),
-                data_io,
-                unit_messages_from_network,
-                spawn_handle,
-                ordered_batch_rx,
-                notification_handler: handler,
-            },
-            req_checker,
-        )
+        Runway {
+            config,
+            store,
+            keybox: keychain,
+            alerts_for_alerter,
+            notifications_from_alerter,
+            alerter: Some(alerter),
+            tx_consensus,
+            rx_consensus,
+            consensus: Some(consensus),
+            data_io,
+            unit_messages_from_network,
+            spawn_handle,
+            ordered_batch_rx,
+            notification_handler: handler,
+        }
     }
 
     fn index(&self) -> NodeIndex {
         self.config.node_ix
+    }
+
+    pub(crate) fn create_request_checker(&mut self) -> RequestChecker<H, D, MK> {
+        RequestChecker::new(self.store.clone())
     }
 
     fn on_unit_message(&mut self, message: UnitMessage<H, D, MK::Signature>) {
@@ -163,7 +155,9 @@ where
         match message {
             NewUnit(u) => {
                 trace!(target: "AlephBFT-runway", "{:?} New unit received {:?}.", self.index(), &u);
-                self.on_unit_received(u, false);
+                if self.on_unit_received(u, false).is_err() {
+                    debug!(target: "AlephBFT-runway", "{:?} Failed to process a received unit.", self.index());
+                }
             }
             RequestCoord(peer_id, coord) => {
                 self.on_request_coord(peer_id, coord);
