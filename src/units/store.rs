@@ -162,7 +162,7 @@ impl<H: Hasher, D: Data, KB: KeyBox> UnitStore<H, D, KB> {
         self.parents.insert(hash, parents);
     }
 
-    pub(crate) fn get_parents(&mut self, hash: H::Hash) -> Option<&Vec<H::Hash>> {
+    pub(crate) fn get_parents(&self, hash: H::Hash) -> Option<&Vec<H::Hash>> {
         self.parents.get(&hash)
     }
 

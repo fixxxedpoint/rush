@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     network::{NetworkHub, Recipient},
-    runway::Runway,
+    runway::{RequestChecker, Runway},
     signed::Signature,
     units::{PreUnit, UncheckedSignedUnit, Unit, UnitCoord},
     Data, DataIO, Hasher, MultiKeychain, Network, NodeCount, NodeIndex, Receiver, Sender,
@@ -170,39 +170,33 @@ where
     }
 }
 
-struct RunningMember<'a, H, D, DP, MK, NH, SH, N>
+struct RunningMember<'a, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
     DP: DataIO<D> + Send,
     MK: MultiKeychain,
-    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
     SH: SpawnHandle,
-    N: Network<H, D, MK::Signature, MK::PartialMultisignature>,
 {
     member: Member<'a, H, D, DP, MK, SH>,
-    runway: Runway<'a, H, D, MK, DP, NH, SH>,
-    network: NetworkHub<H, D, MK::Signature, MK::PartialMultisignature, N>,
+    request_checker: RequestChecker<H, D, MK>,
     unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
     unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
     unit_messages_from_units_proxy: Receiver<(UnitMessage<H, D, MK::Signature>, Option<Recipient>)>,
     unit_messages_for_units_proxy: Sender<UnitMessage<H, D, MK::Signature>>,
 }
 
-impl<'a, H, D, DP, MK, NH, SH, N> RunningMember<'a, H, D, DP, MK, NH, SH, N>
+impl<'a, H, D, DP, MK, SH> RunningMember<'a, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
     DP: DataIO<D> + Send,
     MK: MultiKeychain,
-    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
     SH: SpawnHandle,
-    N: Network<H, D, MK::Signature, MK::PartialMultisignature>,
 {
     fn new(
         member: Member<'a, H, D, DP, MK, SH>,
-        runway: Runway<'a, H, D, MK, DP, NH, SH>,
-        network: NetworkHub<H, D, MK::Signature, MK::PartialMultisignature, N>,
+        request_checker: RequestChecker<H, D, MK>,
         unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
         unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
         unit_messages_from_units_proxy: Receiver<(
@@ -213,19 +207,35 @@ where
     ) -> Self {
         Self {
             member,
-            runway,
-            network,
+            request_checker,
             unit_messages_for_network,
             unit_messages_from_network,
             unit_messages_from_units_proxy,
             unit_messages_for_units_proxy,
         }
     }
+}
 
-    async fn run(&mut self, mut exit: oneshot::Receiver<()>) {
-        let (network_exit, exit_stream) = oneshot::channel();
+impl<H, D, DP, MK, SH> RunningMember<'static, H, D, DP, MK, SH>
+where
+    H: Hasher,
+    D: Data,
+    DP: DataIO<D> + Send + 'static,
+    MK: MultiKeychain,
+    SH: SpawnHandle,
+{
+    async fn run<
+        N: Network<H, D, MK::Signature, MK::PartialMultisignature> + 'static,
+        NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
+    >(
+        mut self,
+        mut network: NetworkHub<H, D, MK::Signature, MK::PartialMultisignature, N>,
+        mut runway: Runway<'static, H, D, MK, DP, NH, SH>,
+        mut exit: oneshot::Receiver<()>,
+    ) {
         info!(target: "AlephBFT-member", "{:?} Spawning network.", self.index());
-        let network = self.network;
+        let index = self.index();
+        let (network_exit, exit_stream) = oneshot::channel();
         let network_handle =
             self.member
                 .spawn_handle
@@ -235,7 +245,7 @@ where
                 );
         let mut network_handle = into_infinite_stream(network_handle).fuse();
         let (runway_exit, exit_stream) = oneshot::channel();
-        let runway_handle = self.runway.run(exit_stream);
+        let runway_handle = runway.run(exit_stream);
         pin_mut!(runway_handle);
         let mut runway_handle = into_infinite_stream(runway_handle).fuse();
 
@@ -246,7 +256,7 @@ where
                         self.on_unit_message_from_units(message, recipient);
                     },
                     None => {
-                        error!(target: "AlephBFT-member", "{:?} Unit message stream from Runway closed.", self.index());
+                        error!(target: "AlephBFT-member", "{:?} Unit message stream from Runway closed.", index);
                         break;
                     },
                 },
@@ -256,18 +266,18 @@ where
                         self.unit_messages_for_units_proxy.unbounded_send(message).expect("Runway should be open.");
                     },
                     None => {
-                        error!(target: "AlephBFT-member", "{:?} Unit message stream from network closed.", self.index());
+                        error!(target: "AlephBFT-member", "{:?} Unit message stream from network closed.", index);
                         break;
                     },
                 },
 
                 _ = runway_handle.next() => {
-                    debug!(target: "AlephBFT-member", "{:?} runway task terminated early.", self.index());
+                    debug!(target: "AlephBFT-member", "{:?} runway task terminated early.", index);
                     break;
                 },
 
                 _ = network_handle.next() => {
-                    debug!(target: "AlephBFT-member", "{:?} network task terminated early.", self.index());
+                    debug!(target: "AlephBFT-member", "{:?} network task terminated early.", index);
                     break;
                 },
 
@@ -277,15 +287,13 @@ where
     }
 }
 
-impl<'a, H, D, DP, MK, NH, SH, N> RunningMember<'a, H, D, DP, MK, NH, SH, N>
+impl<'a, H, D, DP, MK, SH> RunningMember<'a, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
     DP: 'static + DataIO<D> + Send,
     MK: MultiKeychain,
-    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
     SH: SpawnHandle,
-    N: Network<H, D, MK::Signature, MK::PartialMultisignature>,
 {
     fn on_create(&mut self, u: UncheckedSignedUnit<H, D, MK::Signature>) {
         let index = self.member.scheduled_units.len();
@@ -357,7 +365,7 @@ where
     }
 
     fn schedule_parents_request(&mut self, u_hash: H::Hash, curr_time: time::Instant) {
-        if self.runway.missing_parents(&u_hash) {
+        if self.request_checker.missing_parents(&u_hash) {
             let message = UnitMessage::<H, D, MK::Signature>::RequestParents(self.index(), u_hash);
             let peer_id = self.random_peer();
             self.send_unit_message(message, peer_id);
@@ -376,7 +384,7 @@ where
         trace!(target: "AlephBFT-member", "{:?} Starting request for {:?}", self.index(), coord);
         // If we already received or never asked for such coord then there is no need to request it.
         // It will be sent to consensus soon (or have already been sent).
-        if !self.runway.missing_coords(&coord) {
+        if !self.request_checker.missing_coords(&coord) {
             trace!(target: "AlephBFT-member", "{:?} Request dropped as the unit is in store already {:?}", self.index(), coord);
             return;
         }
@@ -458,7 +466,7 @@ impl<H, D, DP, MK, SH> Member<'static, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
-    DP: DataIO<D> + Send,
+    DP: DataIO<D> + Send + 'static,
     MK: MultiKeychain,
     SH: SpawnHandle,
 {
@@ -491,7 +499,7 @@ where
         let (unit_messages_for_network_proxy, unit_messages_from_units_proxy) = mpsc::unbounded();
         let (unit_messages_for_units_proxy, unit_messages_from_network_proxy) = mpsc::unbounded();
 
-        let runway = Runway::new(
+        let (runway, request_checker) = Runway::new(
             config,
             self.keybox,
             self.data_io.take().unwrap(),
@@ -508,15 +516,14 @@ where
 
         let mut running_member = RunningMember::new(
             self,
-            runway,
-            network_hub,
+            request_checker,
             unit_messages_for_network,
             unit_messages_from_network,
             unit_messages_from_units_proxy,
             unit_messages_for_units_proxy,
         );
 
-        running_member.run(exit).await;
+        running_member.run(network_hub, runway, exit).await;
 
         info!(target: "AlephBFT-member", "{:?} Run ended.", index);
     }
