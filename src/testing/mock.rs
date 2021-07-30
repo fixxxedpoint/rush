@@ -551,6 +551,6 @@ pub(crate) fn spawn_honest_member(
         let member = HonestMember::new(data_io, &keybox, config, spawner_inner.clone());
         member.run_session(network, exit_rx).await;
     };
-    spawner.spawn("member", member_task);
+    spawner.spawn("member", async move { member_task.await });
     (rx_batch, exit_tx)
 }

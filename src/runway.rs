@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, sync::Arc};
 
 use crate::{
     alerts::{Alert, AlertConfig, AlertMessage, Alerter, ForkProof, ForkingNotification},
@@ -24,13 +24,11 @@ where
     D: Data,
     MK: MultiKeychain,
 {
-    store: Rc<RefCell<UnitStore<H, D, MK>>>,
-    // receiver: Receiver<(UnitMessage<H, D, MK::Signature>, Option<Recipient>)>,
+    store: Arc<RefCell<UnitStore<H, D, MK>>>,
 }
 
 impl<H: Hasher, D: Data, MK: MultiKeychain> RequestChecker<H, D, MK> {
-    fn new(store: Rc<RefCell<UnitStore<H, D, MK>>>) -> Self {
-        // RequestChecker { store, receiver }
+    fn new(store: Arc<RefCell<UnitStore<H, D, MK>>>) -> Self {
         RequestChecker { store }
     }
 
@@ -70,7 +68,7 @@ where
     SH: SpawnHandle,
 {
     config: Config,
-    store: Rc<RefCell<UnitStore<H, D, MK>>>,
+    store: Arc<RefCell<UnitStore<H, D, MK>>>,
     keybox: &'a MK,
     alerts_for_alerter: Sender<Alert<H, D, MK::Signature>>,
     notifications_from_alerter: Receiver<ForkingNotification<H, D, MK::Signature>>,
@@ -140,7 +138,7 @@ where
         let n_members = config.n_members;
         let threshold = (n_members * 2) / 3 + NodeCount(1);
         let max_round = config.max_round;
-        let store = Rc::new(RefCell::new(UnitStore::new(
+        let store = Arc::new(RefCell::new(UnitStore::new(
             n_members, threshold, max_round,
         )));
         (

@@ -71,8 +71,6 @@ impl<H: Hasher, SH: SpawnHandle> Consensus<H, SH> {
             )
             .fuse();
 
-        // TODO add airstrip here
-        // Runway::n
         let mut terminal = Terminal::new(
             self.conf.node_ix,
             self.incoming_notifications,

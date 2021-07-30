@@ -123,12 +123,12 @@ impl<'a> TestData<'a> {
     async fn collect_multisigned_hashes(
         mut self,
         count: usize,
-    ) -> HashMap<NodeIndex, Vec<Multisigned<'a, Hash, TestMultiKeychain>>> {
+    ) -> HashMap<NodeIndex, Vec<Multisigned<Hash, TestMultiKeychain>>> {
         let mut hashes = HashMap::new();
 
         for _ in 0..count {
             // covert each RMC into a future returning an optional unchecked multisigned hash.
-            let rmc_futures: Vec<BoxFuture<Multisigned<'a, Hash, TestMultiKeychain>>> = self
+            let rmc_futures: Vec<BoxFuture<Multisigned<Hash, TestMultiKeychain>>> = self
                 .rmcs
                 .iter_mut()
                 .map(|rmc| rmc.next_multisigned_hash().boxed())
