@@ -25,10 +25,12 @@ where
     MK: MultiKeychain,
 {
     store: Rc<RefCell<UnitStore<H, D, MK>>>,
+    // receiver: Receiver<(UnitMessage<H, D, MK::Signature>, Option<Recipient>)>,
 }
 
 impl<H: Hasher, D: Data, MK: MultiKeychain> RequestChecker<H, D, MK> {
     fn new(store: Rc<RefCell<UnitStore<H, D, MK>>>) -> Self {
+        // RequestChecker { store, receiver }
         RequestChecker { store }
     }
 
@@ -39,7 +41,24 @@ impl<H: Hasher, D: Data, MK: MultiKeychain> RequestChecker<H, D, MK> {
     pub(crate) fn missing_coords(&self, coord: &UnitCoord) -> bool {
         !self.store.borrow().contains_coord(coord)
     }
+
+    // pub(crate) async fn next_request(
+    //     &self,
+    // ) -> (UnitMessage<H, D, MK::Signature>, Option<Recipient>) {
+    //     self.receiver.next().await
+    // }
 }
+
+// impl<H: Hasher, D: Data, MK: MultiKeychain> Stream for RequestChecker<H, D, MK> {
+//     type Item = (UnitMessage<H, D, MK::Signature>, Option<Recipient>);
+
+//     fn poll_next(
+//         self: std::pin::Pin<&mut Self>,
+//         cx: &mut std::task::Context<'_>,
+//     ) -> std::task::Poll<Option<Self::Item>> {
+//         self.receiver.poll_next_unpin(cx)
+//     }
+// }
 
 pub(crate) struct Runway<'a, H, D, MK, DP, NH, SH>
 where
@@ -89,7 +108,7 @@ where
         >,
         unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
         handler: NH,
-    ) -> Self {
+    ) -> (Self, RequestChecker<H, D, MK>) {
         let (tx_consensus, consensus_stream) = mpsc::unbounded();
         let (consensus_sink, rx_consensus) = mpsc::unbounded();
         let (ordered_batch_tx, ordered_batch_rx) = mpsc::unbounded();
@@ -124,30 +143,29 @@ where
         let store = Rc::new(RefCell::new(UnitStore::new(
             n_members, threshold, max_round,
         )));
-        Runway {
-            config,
-            store,
-            keybox: keychain,
-            alerts_for_alerter,
-            notifications_from_alerter,
-            alerter: Some(alerter),
-            tx_consensus,
-            rx_consensus,
-            consensus: Some(consensus),
-            data_io,
-            unit_messages_from_network,
-            spawn_handle,
-            ordered_batch_rx,
-            notification_handler: handler,
-        }
+        (
+            Runway {
+                config,
+                store: store.clone(),
+                keybox: keychain,
+                alerts_for_alerter,
+                notifications_from_alerter,
+                alerter: Some(alerter),
+                tx_consensus,
+                rx_consensus,
+                consensus: Some(consensus),
+                data_io,
+                unit_messages_from_network,
+                spawn_handle,
+                ordered_batch_rx,
+                notification_handler: handler,
+            },
+            RequestChecker::new(store),
+        )
     }
 
     fn index(&self) -> NodeIndex {
         self.config.node_ix
-    }
-
-    pub(crate) fn create_request_checker(&mut self) -> RequestChecker<H, D, MK> {
-        RequestChecker::new(self.store.clone())
     }
 
     fn on_unit_message(&mut self, message: UnitMessage<H, D, MK::Signature>) {
@@ -386,7 +404,6 @@ where
         u_hash: H::Hash,
         parents: Vec<UncheckedSignedUnit<H, D, MK::Signature>>,
     ) -> Result<(), ()> {
-        todo!("send the parents request again if something is wrong with that response");
         if self.store.borrow().get_parents(u_hash).is_some() {
             trace!(target: "AlephBFT-runway", "{:?} We got parents response but already know the parents.", self.index());
             return Ok(());
@@ -445,7 +462,9 @@ where
             return Err(());
         }
         let p_hashes: Vec<H::Hash> = p_hashes_node_map.into_iter().flatten().collect();
-        self.store.borrow().add_parents(u_hash, p_hashes.clone());
+        self.store
+            .borrow_mut()
+            .add_parents(u_hash, p_hashes.clone());
         trace!(target: "AlephBFT-runway", "{:?} Succesful parents reponse for {:?}.", self.index(), u_hash);
         self.send_consensus_notification(NotificationIn::UnitParents(u_hash, p_hashes));
         Ok(())
@@ -468,7 +487,9 @@ where
             }
             Units(units) => {
                 for uu in units {
-                    self.on_unit_received(uu, true);
+                    if self.on_unit_received(uu, true).is_err() {
+                        debug!(target: "AlephBFT-runway", "{:?} on_alert_notification failed to process units.", self.index());
+                    }
                 }
             }
         }

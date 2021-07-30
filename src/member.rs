@@ -504,7 +504,7 @@ where
         let (unit_messages_for_network_proxy, unit_messages_from_units_proxy) = mpsc::unbounded();
         let (unit_messages_for_units_proxy, unit_messages_from_network_proxy) = mpsc::unbounded();
 
-        let mut runway = Runway::new(
+        let (runway, request_checker) = Runway::new(
             config,
             self.keybox,
             self.data_io.take().unwrap(),
@@ -518,7 +518,6 @@ where
                     .expect("proxy connection should be open");
             },
         );
-        let request_checker = runway.create_request_checker();
 
         let mut initialized_member = InitializedMember::new(
             self,
