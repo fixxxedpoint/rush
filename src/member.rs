@@ -166,6 +166,10 @@ where
             scheduled_units: Vec::new(),
         }
     }
+
+    fn index(&self) -> NodeIndex {
+        self.config.node_ix
+    }
 }
 
 struct InitializedMember<'a, H, D, DP, MK, SH>
@@ -226,9 +230,9 @@ where
         N: Network<H, D, MK::Signature, MK::PartialMultisignature> + 'static,
         NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
     >(
-        mut self,
+        &mut self,
         mut network: NetworkHub<H, D, MK::Signature, MK::PartialMultisignature, N>,
-        mut runway: Runway<'static, H, D, MK, DP, NH, SH>,
+        runway: Runway<'static, H, D, MK, DP, NH, SH>,
         mut exit: oneshot::Receiver<()>,
     ) {
         info!(target: "AlephBFT-member", "{:?} Spawning network.", self.index());
@@ -242,10 +246,14 @@ where
                     async move { network.run(exit_stream).await },
                 );
         let mut network_handle = into_infinite_stream(network_handle).fuse();
+        info!(target: "AlephBFT-member", "{:?} Network spawned.", self.index());
+
+        info!(target: "AlephBFT-member", "{:?} Initializing Runway.", self.index());
         let (runway_exit, exit_stream) = oneshot::channel();
         let runway_handle = runway.run(exit_stream);
         pin_mut!(runway_handle);
         let mut runway_handle = into_infinite_stream(runway_handle).fuse();
+        info!(target: "AlephBFT-member", "{:?} Runway initialized.", self.index());
 
         loop {
             futures::select! {
@@ -290,7 +298,7 @@ where
             debug!(target: "AlephBFT-member", "{:?} network already stopped.", index);
         }
         network_handle.next().await.unwrap();
-        debug!(target: "AlephBFT-member", "{:?} InitializedMember stopped.", index);
+        debug!(target: "AlephBFT-member", "{:?} Member stopped.", index);
     }
 }
 
@@ -327,7 +335,7 @@ where
 
     // Pulls tasks from the priority queue (sorted by scheduled time) and sends them to random peers
     // as long as they are scheduled at time <= curr_time
-    pub(crate) fn trigger_tasks(&mut self) {
+    fn trigger_tasks(&mut self) {
         while let Some(request) = self.member.requests.peek() {
             let curr_time = time::Instant::now();
             if request.scheduled_time > curr_time {
@@ -477,7 +485,7 @@ where
         exit: oneshot::Receiver<()>,
     ) {
         let config = self.config.clone();
-        let index = config.node_ix;
+        let index = self.index();
         info!(target: "AlephBFT-member", "{:?} Spawning party for a session.", index);
 
         let (alert_messages_for_alerter, alert_messages_from_network) = mpsc::unbounded();
@@ -512,7 +520,7 @@ where
         );
         let request_checker = runway.create_request_checker();
 
-        let initialized_member = InitializedMember::new(
+        let mut initialized_member = InitializedMember::new(
             self,
             request_checker,
             unit_messages_for_network,
@@ -520,6 +528,8 @@ where
             unit_messages_from_units_proxy,
             unit_messages_for_units_proxy,
         );
+
+        info!(target: "AlephBFT-member", "{:?} Running member.", index);
 
         initialized_member.run(network_hub, runway, exit).await;
 

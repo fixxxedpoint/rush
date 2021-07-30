@@ -504,7 +504,7 @@ where
         (self.notification_handler)((message, Some(Recipient::Everyone)));
     }
 
-    pub(crate) fn on_missing_coords(&mut self, mut coords: Vec<UnitCoord>) {
+    fn on_missing_coords(&mut self, mut coords: Vec<UnitCoord>) {
         trace!(target: "AlephBFT-runway", "{:?} Dealing with missing coords notification {:?}.", self.index(), coords);
         coords.retain(|coord| !self.store.borrow().contains_coord(coord));
         for coord in coords {
@@ -570,9 +570,9 @@ where
     NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
     SH: SpawnHandle,
 {
-    pub async fn run(&mut self, exit: oneshot::Receiver<()>) {
-        todo!("runway nie powinnien byc odpalany w osobnym watku od membera, tylko dzialac w tym samym i udostepniac wygodny interfejs dla niego");
-        info!(target: "AlephBFT-airstrip", "{:?} Airstrip starting.", self.index());
+    pub(crate) async fn run(mut self, mut exit: oneshot::Receiver<()>) {
+        // todo!("runway nie powinnien byc odpalany w osobnym watku od membera, tylko dzialac w tym samym i udostepniac wygodny interfejs dla niego");
+        info!(target: "AlephBFT-runway", "{:?} Runway starting.", self.index());
 
         let index = self.index();
         let (alerter_exit, exit_stream) = oneshot::channel();
@@ -593,7 +593,7 @@ where
             });
         let mut consensus_handle = into_infinite_stream(consensus_handle).fuse();
 
-        info!(target: "AlephBFT-airstrip", "{:?} Airstrip started.", index);
+        info!(target: "AlephBFT-runway", "{:?} Runway started.", index);
         loop {
             futures::select! {
                 notification = self.rx_consensus.next() => match notification {
@@ -643,13 +643,17 @@ where
             self.move_units_to_consensus();
         }
 
-        info!(target: "AlephBFT-airstrip", "{:?} Ending run.", index);
+        info!(target: "AlephBFT-runway", "{:?} Ending run.", index);
 
-        let _ = consensus_exit.send(());
+        if consensus_exit.send(()).is_err() {
+            debug!(target: "AlephBFT-runway", "{:?} consensus already stopped.", index);
+        }
         consensus_handle.next().await.unwrap();
-        let _ = alerter_exit.send(());
+        if alerter_exit.send(()).is_err() {
+            debug!(target: "AlephBFT-runway", "{:?} alerter already stopped.", index);
+        }
         alerter_handle.next().await.unwrap();
 
-        info!(target: "AlephBFT-airstrip", "{:?} Run ended.", index);
+        info!(target: "AlephBFT-runway", "{:?} Run ended.", index);
     }
 }
