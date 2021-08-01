@@ -1,9 +1,9 @@
 use crate::{
     config::Config,
     network::{NetworkHub, Recipient},
-    runway::{RequestChecker, Runway},
+    runway::{RequestTracker, Runway},
     signed::Signature,
-    units::{PreUnit, UncheckedSignedUnit, Unit, UnitCoord},
+    units::{PreUnit, UncheckedSignedUnit, Unit, UnitCoord, UnitStore},
     Data, DataIO, Hasher, MultiKeychain, Network, NodeCount, NodeIndex, Receiver, Sender,
     SpawnHandle,
 };
@@ -17,7 +17,7 @@ use futures::{
 };
 use log::{debug, error, info, trace, warn};
 use rand::Rng;
-use std::{cmp::Ordering, collections::BinaryHeap, fmt::Debug, iter::repeat, time};
+use std::{cell::RefCell, cmp::Ordering, collections::BinaryHeap, fmt::Debug, iter::repeat, time};
 
 pub(crate) fn into_infinite_stream<F: Future>(f: F) -> impl Stream<Item = ()> {
     f.then(|_| ready(iter(repeat(())))).flatten_stream()
@@ -154,7 +154,7 @@ where
     /// Create a new instance of the Member for a given session. Under the hood, the Member implementation
     /// makes an extensive use of asynchronous features of Rust, so creating a new Member doesn't start it.
     /// See [`Member::run_session`].
-    pub fn new(data_io: DP, keybox: &'static MK, config: Config, spawn_handle: SH) -> Self {
+    pub fn new(data_io: DP, keybox: &'a MK, config: Config, spawn_handle: SH) -> Self {
         let n_members = config.n_members;
         Member {
             config,
@@ -181,7 +181,8 @@ where
     SH: SpawnHandle,
 {
     member: Member<'a, H, D, DP, MK, SH>,
-    request_checker: RequestChecker<H, D, MK>,
+    request_checker: RequestTracker<H, D, MK>,
+    // runway: Runway<>
     unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
     unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
     unit_messages_from_units_proxy: Receiver<(UnitMessage<H, D, MK::Signature>, Option<Recipient>)>,
@@ -198,7 +199,7 @@ where
 {
     fn new(
         member: Member<'a, H, D, DP, MK, SH>,
-        request_checker: RequestChecker<H, D, MK>,
+        request_checker: RequestTracker<H, D, MK>,
         unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
         unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
         unit_messages_from_units_proxy: Receiver<(
@@ -484,7 +485,6 @@ where
         network: N,
         exit: oneshot::Receiver<()>,
     ) {
-        let config = self.config.clone();
         let index = self.index();
         info!(target: "AlephBFT-member", "{:?} Spawning party for a session.", index);
 
@@ -504,8 +504,9 @@ where
         let (unit_messages_for_network_proxy, unit_messages_from_units_proxy) = mpsc::unbounded();
         let (unit_messages_for_units_proxy, unit_messages_from_network_proxy) = mpsc::unbounded();
 
-        let (runway, request_checker) = Runway::new(
-            config,
+        // let (runway, request_checker) = Runway::new(
+        let runway = Runway::new(
+            self.config.clone(),
             self.keybox,
             self.data_io.take().unwrap(),
             self.spawn_handle.clone(),
@@ -518,10 +519,11 @@ where
                     .expect("proxy connection should be open");
             },
         );
+        let request_tracker = runway.create_request_tracker();
 
         let mut initialized_member = InitializedMember::new(
             self,
-            request_checker,
+            request_tracker,
             unit_messages_for_network,
             unit_messages_from_network,
             unit_messages_from_units_proxy,

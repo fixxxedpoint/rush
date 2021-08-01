@@ -551,6 +551,25 @@ pub(crate) fn spawn_honest_member(
         let member = HonestMember::new(data_io, &keybox, config, spawner_inner.clone());
         member.run_session(network, exit_rx).await;
     };
-    spawner.spawn("member", async move { member_task.await });
+    spawner.spawn("member", member_task);
     (rx_batch, exit_tx)
 }
+
+// struct Test<J: Future, F: Fn() -> J> {
+//     state: Option<Pin<Box<J>>>,
+//     constructor: F,
+// }
+
+// impl<J: Future, F: Fn() -> J> Future for Test<J, F> {
+//     type Output = ();
+
+//     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+//         match self.state {
+//             Some(_) => todo!(),
+//             None => {
+//                 let state = Box::pin((self.constructor)());
+//                 Future::poll(state.as_mut(), cx)
+//             }
+//         }
+//     }
+// }

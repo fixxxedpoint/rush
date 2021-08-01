@@ -186,7 +186,7 @@ mod tests {
         count: NodeCount,
         session_id: u64,
         keybox: &'_ KeyBox,
-    ) -> SignedUnit<'_, Hasher64, Data, KeyBox> {
+    ) -> SignedUnit<Hasher64, Data, KeyBox> {
         let preunit = PreUnit::<Hasher64>::new(
             node_idx,
             round,

@@ -17,27 +17,28 @@ use futures::{
     StreamExt,
 };
 use log::{debug, error, info, trace, warn};
+use parking_lot::RwLock;
 
-pub(crate) struct RequestChecker<H, D, MK>
+pub(crate) struct RequestTracker<H, D, MK>
 where
     H: Hasher,
     D: Data,
     MK: MultiKeychain,
 {
-    store: Arc<RefCell<UnitStore<H, D, MK>>>,
+    store: Arc<RwLock<UnitStore<H, D, MK>>>,
 }
 
-impl<H: Hasher, D: Data, MK: MultiKeychain> RequestChecker<H, D, MK> {
-    fn new(store: Arc<RefCell<UnitStore<H, D, MK>>>) -> Self {
-        RequestChecker { store }
+impl<'a, H: Hasher, D: Data, MK: MultiKeychain> RequestTracker<H, D, MK> {
+    fn new(store: Arc<RwLock<UnitStore<H, D, MK>>>) -> Self {
+        RequestTracker { store }
     }
 
     pub(crate) fn missing_parents(&self, u_hash: &H::Hash) -> bool {
-        self.store.borrow().get_parents(*u_hash).is_none()
+        self.store.read().get_parents(*u_hash).is_none()
     }
 
     pub(crate) fn missing_coords(&self, coord: &UnitCoord) -> bool {
-        !self.store.borrow().contains_coord(coord)
+        !self.store.read().contains_coord(coord)
     }
 
     // pub(crate) async fn next_request(
@@ -64,11 +65,11 @@ where
     D: Data,
     MK: MultiKeychain,
     DP: DataIO<D>,
-    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
+    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)) + 'a,
     SH: SpawnHandle,
 {
     config: Config,
-    store: Arc<RefCell<UnitStore<H, D, MK>>>,
+    store: Arc<RwLock<UnitStore<H, D, MK>>>,
     keybox: &'a MK,
     alerts_for_alerter: Sender<Alert<H, D, MK::Signature>>,
     notifications_from_alerter: Receiver<ForkingNotification<H, D, MK::Signature>>,
@@ -106,7 +107,7 @@ where
         >,
         unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
         handler: NH,
-    ) -> (Self, RequestChecker<H, D, MK>) {
+    ) -> Self {
         let (tx_consensus, consensus_stream) = mpsc::unbounded();
         let (consensus_sink, rx_consensus) = mpsc::unbounded();
         let (ordered_batch_tx, ordered_batch_rx) = mpsc::unbounded();
@@ -138,28 +139,27 @@ where
         let n_members = config.n_members;
         let threshold = (n_members * 2) / 3 + NodeCount(1);
         let max_round = config.max_round;
-        let store = Arc::new(RefCell::new(UnitStore::new(
-            n_members, threshold, max_round,
-        )));
-        (
-            Runway {
-                config,
-                store: store.clone(),
-                keybox: keychain,
-                alerts_for_alerter,
-                notifications_from_alerter,
-                alerter: Some(alerter),
-                tx_consensus,
-                rx_consensus,
-                consensus: Some(consensus),
-                data_io,
-                unit_messages_from_network,
-                spawn_handle,
-                ordered_batch_rx,
-                notification_handler: handler,
-            },
-            RequestChecker::new(store),
-        )
+        let store = Arc::new(RwLock::new(UnitStore::new(n_members, threshold, max_round)));
+        Runway {
+            config,
+            store,
+            keybox: keychain,
+            alerts_for_alerter,
+            notifications_from_alerter,
+            alerter: Some(alerter),
+            tx_consensus,
+            rx_consensus,
+            consensus: Some(consensus),
+            data_io,
+            unit_messages_from_network,
+            spawn_handle,
+            ordered_batch_rx,
+            notification_handler: handler,
+        }
+    }
+
+    pub(crate) fn create_request_tracker(&self) -> RequestTracker<H, D, MK> {
+        RequestTracker::new(self.store.clone())
     }
 
     fn index(&self) -> NodeIndex {
@@ -208,17 +208,13 @@ where
         alert: bool,
     ) -> Result<(), ()> {
         // todo!();
-        if self
-            .store
-            .borrow()
-            .contains_coord(&uu.as_signable().coord())
-        {
+        if self.store.read().contains_coord(&uu.as_signable().coord()) {
             return Ok(());
         }
         if let Some(su) = self.validate_unit(uu) {
             if alert {
                 // Units from alerts explicitly come from forkers, and we want them anyway.
-                self.store.borrow_mut().add_unit(su, true);
+                self.store.write().add_unit(su, true);
             } else {
                 self.add_unit_to_store_unless_fork(su);
             }
@@ -247,7 +243,7 @@ where
             warn!(target: "AlephBFT-runway", "{:?} A unit with incorrect session_id! {:?}", self.index(), full_unit);
             return None;
         }
-        if full_unit.round() > self.store.borrow().limit_per_node() {
+        if full_unit.round() > self.store.read().limit_per_node() {
             warn!(target: "AlephBFT-runway", "{:?} A unit with too high round {}! {:?}", self.index(), full_unit.round(), full_unit);
             return None;
         }
@@ -265,14 +261,14 @@ where
     fn add_unit_to_store_unless_fork(&mut self, su: SignedUnit<H, D, MK>) {
         let full_unit = su.as_signable();
         trace!(target: "AlephBFT-runway", "{:?} Adding member unit to store {:?}", self.index(), full_unit);
-        if self.store.borrow().is_forker(full_unit.creator()) {
+        if self.store.read().is_forker(full_unit.creator()) {
             trace!(target: "AlephBFT-runway", "{:?} Ignoring forker's unit {:?}", self.index(), full_unit);
             return;
         }
-        let sv = self.store.borrow().is_new_fork(full_unit);
+        let sv = self.store.read().is_new_fork(full_unit);
         if let Some(sv) = sv {
             let creator = full_unit.creator();
-            let is_forker = self.store.borrow().is_forker(creator);
+            let is_forker = self.store.read().is_forker(creator);
             if !is_forker {
                 // We need to mark the forker if it is not known yet.
                 let proof = (su.into(), sv.into());
@@ -283,10 +279,10 @@ where
             return;
         }
         let u_round = full_unit.round();
-        let round_in_progress = self.store.borrow().get_round_in_progress();
+        let round_in_progress = self.store.read().get_round_in_progress();
         let rounds_margin = self.config.rounds_margin;
         if u_round <= round_in_progress + rounds_margin {
-            self.store.borrow_mut().add_unit(su, false);
+            self.store.write().add_unit(su, false);
         } else {
             warn!(target: "AlephBFT-runway", "{:?} Unit {:?} ignored because of too high round {} when round in progress is {}.", self.index(), full_unit, u_round, round_in_progress);
         }
@@ -325,7 +321,7 @@ where
 
     fn on_new_forker_detected(&mut self, forker: NodeIndex, proof: ForkProof<H, D, MK::Signature>) {
         let max_units_alert = self.config.max_units_per_alert;
-        let mut alerted_units = self.store.borrow_mut().mark_forker(forker);
+        let mut alerted_units = self.store.write().mark_forker(forker);
         if alerted_units.len() > max_units_alert {
             // The ordering is increasing w.r.t. rounds.
             alerted_units.reverse();
@@ -352,7 +348,7 @@ where
 
     fn on_request_coord(&mut self, peer_id: NodeIndex, coord: UnitCoord) {
         debug!(target: "AlephBFT-runway", "{:?} Received fetch request for coord {:?} from {:?}.", self.index(), coord, peer_id);
-        let maybe_su = (self.store.borrow().unit_by_coord(coord)).cloned();
+        let maybe_su = (self.store.read().unit_by_coord(coord)).cloned();
 
         if let Some(su) = maybe_su {
             trace!(target: "AlephBFT-runway", "{:?} Answering fetch request for coord {:?} from {:?}.", self.index(), coord, peer_id);
@@ -371,12 +367,12 @@ where
         debug!(target: "AlephBFT-runway", "{:?} Received parents request for hash {:?} from {:?}.", self.index(), u_hash, peer_id);
 
         let mut message = None;
-        if let Some(p_hashes) = self.store.borrow().get_parents(u_hash) {
+        if let Some(p_hashes) = self.store.read().get_parents(u_hash) {
             let p_hashes = p_hashes.clone();
             trace!(target: "AlephBFT-runway", "{:?} Answering parents request for hash {:?} from {:?}.", self.index(), u_hash, peer_id);
             let mut full_units = Vec::new();
             for hash in p_hashes.iter() {
-                if let Some(fu) = self.store.borrow().unit_by_hash(hash) {
+                if let Some(fu) = self.store.read().unit_by_hash(hash) {
                     full_units.push(fu.clone().into());
                 } else {
                     debug!(target: "AlephBFT-runway", "{:?} Not answering parents request, one of the parents missing from store.", self.index());
@@ -402,12 +398,11 @@ where
         u_hash: H::Hash,
         parents: Vec<UncheckedSignedUnit<H, D, MK::Signature>>,
     ) -> Result<(), ()> {
-        if self.store.borrow().get_parents(u_hash).is_some() {
+        if self.store.read().get_parents(u_hash).is_some() {
             trace!(target: "AlephBFT-runway", "{:?} We got parents response but already know the parents.", self.index());
             return Ok(());
         }
-        let (u_round, u_control_hash, parent_ids) = match self.store.borrow().unit_by_hash(&u_hash)
-        {
+        let (u_round, u_control_hash, parent_ids) = match self.store.read().unit_by_hash(&u_hash) {
             Some(su) => {
                 let full_unit = su.as_signable();
                 let parent_ids: Vec<_> = full_unit.control_hash().parents().collect();
@@ -460,9 +455,7 @@ where
             return Err(());
         }
         let p_hashes: Vec<H::Hash> = p_hashes_node_map.into_iter().flatten().collect();
-        self.store
-            .borrow_mut()
-            .add_parents(u_hash, p_hashes.clone());
+        self.store.write().add_parents(u_hash, p_hashes.clone());
         trace!(target: "AlephBFT-runway", "{:?} Succesful parents reponse for {:?}.", self.index(), u_hash);
         self.send_consensus_notification(NotificationIn::UnitParents(u_hash, p_hashes));
         Ok(())
@@ -479,7 +472,7 @@ where
         match notification {
             Forker(proof) => {
                 let forker = proof.0.index();
-                if !self.store.borrow().is_forker(forker) {
+                if !self.store.read().is_forker(forker) {
                     self.on_new_forker_detected(forker, proof);
                 }
             }
@@ -505,7 +498,7 @@ where
                 self.on_wrong_control_hash(h);
             }
             NotificationOut::AddedToDag(h, p_hashes) => {
-                self.store.borrow_mut().add_parents(h, p_hashes);
+                self.store.write().add_parents(h, p_hashes);
             }
         }
     }
@@ -516,7 +509,7 @@ where
         let full_unit = FullUnit::new(u, data, self.config.session_id);
         let hash: <H as Hasher>::Hash = full_unit.hash();
         let signed_unit: Signed<FullUnit<H, D>, MK> = Signed::sign(full_unit, self.keybox).await;
-        self.store.borrow_mut().add_unit(signed_unit.clone(), false);
+        self.store.write().add_unit(signed_unit.clone(), false);
 
         let message = UnitMessage::<H, D, MK::Signature>::NewUnit(signed_unit.into());
         trace!(target: "AlephBFT-runway", "{:?} Sending a unit {:?}.", self.index(), hash);
@@ -525,7 +518,7 @@ where
 
     fn on_missing_coords(&mut self, mut coords: Vec<UnitCoord>) {
         trace!(target: "AlephBFT-runway", "{:?} Dealing with missing coords notification {:?}.", self.index(), coords);
-        coords.retain(|coord| !self.store.borrow().contains_coord(coord));
+        coords.retain(|coord| !self.store.read().contains_coord(coord));
         for coord in coords {
             let message = UnitMessage::<H, D, MK::Signature>::RequestCoord(self.index(), coord);
             (self.notification_handler)((message, None));
@@ -535,7 +528,7 @@ where
     fn on_wrong_control_hash(&mut self, u_hash: H::Hash) {
         trace!(target: "AlephBFT-runway", "{:?} Dealing with wrong control hash notification {:?}.", self.index(), u_hash);
         let mut notification = None;
-        if let Some(p_hashes) = self.store.borrow().get_parents(u_hash) {
+        if let Some(p_hashes) = self.store.read().get_parents(u_hash) {
             // We have the parents by some strange reason (someone sent us parents
             // without us requesting them).
             let p_hashes = p_hashes.clone();
@@ -555,7 +548,7 @@ where
             .iter()
             .map(|h| {
                 self.store
-                    .borrow()
+                    .read()
                     .unit_by_hash(h)
                     .expect("Ordered units must be in store")
                     .as_signable()
@@ -571,7 +564,7 @@ where
     fn move_units_to_consensus(&mut self) {
         let units_to_move = self
             .store
-            .borrow_mut()
+            .write()
             .yield_buffer_units()
             .into_iter()
             .map(|su| su.as_signable().unit())
