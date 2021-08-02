@@ -172,34 +172,40 @@ where
     }
 }
 
-struct InitializedMember<'a, H, D, DP, MK, SH>
+struct InitializedMember<'a, H, D, DP, MK, SH, RF>
 where
     H: Hasher,
     D: Data,
     DP: DataIO<D> + Send,
     MK: MultiKeychain,
     SH: SpawnHandle,
+    // NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)) + 'a,
+    RF: Future<Output = ()>,
 {
     member: Member<'a, H, D, DP, MK, SH>,
-    request_checker: RequestTracker<H, D, MK>,
-    // runway: Runway<>
+    request_checker: RequestTracker<'a, H, D, MK>,
+    // runway: Runway<'a, H, D, MK, DP, NH, SH>,
+    runway_future: RF,
+    runway_exit: oneshot::Sender<()>,
     unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
     unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
     unit_messages_from_units_proxy: Receiver<(UnitMessage<H, D, MK::Signature>, Option<Recipient>)>,
     unit_messages_for_units_proxy: Sender<UnitMessage<H, D, MK::Signature>>,
 }
 
-impl<'a, H, D, DP, MK, SH> InitializedMember<'a, H, D, DP, MK, SH>
+impl<'a, H, D, DP, MK, SH, RF> InitializedMember<'a, H, D, DP, MK, SH, RF>
 where
     H: Hasher,
     D: Data,
     DP: DataIO<D> + Send,
     MK: MultiKeychain,
     SH: SpawnHandle,
+    RF: Future<Output = ()>,
 {
-    fn new(
+    fn new<NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)) + 'a>(
         member: Member<'a, H, D, DP, MK, SH>,
         request_checker: RequestTracker<H, D, MK>,
+        runway: Runway<'a, H, D, MK, DP, NH, SH>,
         unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
         unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
         unit_messages_from_units_proxy: Receiver<(
@@ -208,9 +214,13 @@ where
         )>,
         unit_messages_for_units_proxy: Sender<UnitMessage<H, D, MK::Signature>>,
     ) -> Self {
+        let (runway_exit, exit_stream) = oneshot::channel();
+        let runway_future = runway.run(exit_stream);
         Self {
             member,
             request_checker,
+            runway_future,
+            runway_exit,
             unit_messages_for_network,
             unit_messages_from_network,
             unit_messages_from_units_proxy,
@@ -219,21 +229,18 @@ where
     }
 }
 
-impl<H, D, DP, MK, SH> InitializedMember<'static, H, D, DP, MK, SH>
+impl<H, D, DP, MK, SH, NH, RF> InitializedMember<'static, H, D, DP, MK, SH, NH, RF>
 where
     H: Hasher,
     D: Data,
     DP: DataIO<D> + Send + 'static,
     MK: MultiKeychain,
     SH: SpawnHandle,
+    RF: Future<Output = ()>,
 {
-    async fn run<
-        N: Network<H, D, MK::Signature, MK::PartialMultisignature> + 'static,
-        NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
-    >(
+    async fn run<N: Network<H, D, MK::Signature, MK::PartialMultisignature> + 'static>(
         &mut self,
         mut network: NetworkHub<H, D, MK::Signature, MK::PartialMultisignature, N>,
-        runway: Runway<'static, H, D, MK, DP, NH, SH>,
         mut exit: oneshot::Receiver<()>,
     ) {
         info!(target: "AlephBFT-member", "{:?} Spawning network.", self.index());
@@ -250,11 +257,15 @@ where
         info!(target: "AlephBFT-member", "{:?} Network spawned.", self.index());
 
         info!(target: "AlephBFT-member", "{:?} Initializing Runway.", self.index());
-        let (runway_exit, exit_stream) = oneshot::channel();
-        let runway_handle = runway.run(exit_stream);
-        pin_mut!(runway_handle);
-        let mut runway_handle = into_infinite_stream(runway_handle).fuse();
-        info!(target: "AlephBFT-member", "{:?} Runway initialized.", self.index());
+        // let (runway_exit, exit_stream) = oneshot::channel();
+        // // TODO dodaj metodę ktora zajmuje sie jedynie pchanie do przodu runway
+        // let runway_handle = self.runway.run(exit_stream);
+        // pin_mut!(runway_handle);
+        // let mut runway_handle = into_infinite_stream(runway_handle).fuse();
+
+        // TODO mozliwe rozwiazanie: runway ma metode "check_request" zamiast oddzielnego typu,
+        // runway ma tez async metode proceed ktora zawsze sie konczy, co umozliwia odpytywanie runwaya o requesty
+        info!(target: "AlephBFT-member", "{:?} Runway initialized.", index);
 
         loop {
             futures::select! {
@@ -303,13 +314,14 @@ where
     }
 }
 
-impl<'a, H, D, DP, MK, SH> InitializedMember<'a, H, D, DP, MK, SH>
+impl<'a, H, D, DP, MK, SH, NH> InitializedMember<'a, H, D, DP, MK, SH, NH>
 where
     H: Hasher,
     D: Data,
     DP: 'static + DataIO<D> + Send,
     MK: MultiKeychain,
     SH: SpawnHandle,
+    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)) + 'a,
 {
     fn on_create(&mut self, u: UncheckedSignedUnit<H, D, MK::Signature>) {
         let index = self.member.scheduled_units.len();
@@ -524,6 +536,7 @@ where
         let mut initialized_member = InitializedMember::new(
             self,
             request_tracker,
+            runway,
             unit_messages_for_network,
             unit_messages_from_network,
             unit_messages_from_units_proxy,
@@ -532,7 +545,7 @@ where
 
         info!(target: "AlephBFT-member", "{:?} Running member.", index);
 
-        initialized_member.run(network_hub, runway, exit).await;
+        initialized_member.run(network_hub, exit).await;
 
         info!(target: "AlephBFT-member", "{:?} Run ended.", index);
     }

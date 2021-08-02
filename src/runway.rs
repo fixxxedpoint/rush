@@ -19,17 +19,17 @@ use futures::{
 use log::{debug, error, info, trace, warn};
 use parking_lot::RwLock;
 
-pub(crate) struct RequestTracker<H, D, MK>
+pub(crate) struct RequestTracker<'a, H, D, MK>
 where
     H: Hasher,
     D: Data,
     MK: MultiKeychain,
 {
-    store: Arc<RwLock<UnitStore<H, D, MK>>>,
+    store: &'a UnitStore<H, D, MK>,
 }
 
-impl<'a, H: Hasher, D: Data, MK: MultiKeychain> RequestTracker<H, D, MK> {
-    fn new(store: Arc<RwLock<UnitStore<H, D, MK>>>) -> Self {
+impl<'a, H: Hasher, D: Data, MK: MultiKeychain> RequestTracker<'a, H, D, MK> {
+    fn new(store: &'a UnitStore<H, D, MK>) -> Self {
         RequestTracker { store }
     }
 
@@ -158,8 +158,8 @@ where
         }
     }
 
-    pub(crate) fn create_request_tracker(&self) -> RequestTracker<H, D, MK> {
-        RequestTracker::new(self.store.clone())
+    pub(crate) fn create_request_tracker(&self) -> RequestTracker<'a, H, D, MK> {
+        RequestTracker::new(&self.store)
     }
 
     fn index(&self) -> NodeIndex {
@@ -582,7 +582,7 @@ where
     NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
     SH: SpawnHandle,
 {
-    pub(crate) async fn run(mut self, mut exit: oneshot::Receiver<()>) {
+    pub(crate) async fn run(&mut self, mut exit: oneshot::Receiver<()>) {
         // todo!("runway nie powinnien byc odpalany w osobnym watku od membera, tylko dzialac w tym samym i udostepniac wygodny interfejs dla niego");
         info!(target: "AlephBFT-runway", "{:?} Runway starting.", self.index());
 
