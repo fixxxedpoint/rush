@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     network::{NetworkHub, Recipient},
-    runway::{RequestTracker, Runway},
+    runway::{RequestTracker, Runway, RunwayFacade},
     signed::Signature,
     units::{PreUnit, UncheckedSignedUnit, Unit, UnitCoord, UnitStore},
     Data, DataIO, Hasher, MultiKeychain, Network, NodeCount, NodeIndex, Receiver, Sender,
@@ -172,25 +172,19 @@ where
     }
 }
 
-struct InitializedMember<'a, H, D, DP, MK, SH, RF>
+struct InitializedMember<'a, H, D, DP, MK, SH, HL>
 where
     H: Hasher,
     D: Data,
     DP: DataIO<D> + Send,
     MK: MultiKeychain,
     SH: SpawnHandle,
-    // NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)) + 'a,
-    RF: Future<Output = ()>,
 {
     member: Member<'a, H, D, DP, MK, SH>,
-    request_checker: RequestTracker<'a, H, D, MK>,
-    // runway: Runway<'a, H, D, MK, DP, NH, SH>,
-    runway_future: RF,
+    runway_facade: RunwayFacade<'a, H, D, MK, DP, SH, HL>,
     runway_exit: oneshot::Sender<()>,
     unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
     unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
-    unit_messages_from_units_proxy: Receiver<(UnitMessage<H, D, MK::Signature>, Option<Recipient>)>,
-    unit_messages_for_units_proxy: Sender<UnitMessage<H, D, MK::Signature>>,
 }
 
 impl<'a, H, D, DP, MK, SH, RF> InitializedMember<'a, H, D, DP, MK, SH, RF>
@@ -202,41 +196,30 @@ where
     SH: SpawnHandle,
     RF: Future<Output = ()>,
 {
-    fn new<NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)) + 'a>(
+    fn new<HL>(
         member: Member<'a, H, D, DP, MK, SH>,
-        request_checker: RequestTracker<H, D, MK>,
-        runway: Runway<'a, H, D, MK, DP, NH, SH>,
+        runway_facade: RunwayFacade<'a, H, D, MK, DP, SH, HL>,
         unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
         unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
-        unit_messages_from_units_proxy: Receiver<(
-            UnitMessage<H, D, MK::Signature>,
-            Option<Recipient>,
-        )>,
-        unit_messages_for_units_proxy: Sender<UnitMessage<H, D, MK::Signature>>,
     ) -> Self {
         let (runway_exit, exit_stream) = oneshot::channel();
-        let runway_future = runway.run(exit_stream);
         Self {
             member,
-            request_checker,
-            runway_future,
-            runway_exit,
+            runway_facade,
+            runway_exit: (),
             unit_messages_for_network,
             unit_messages_from_network,
-            unit_messages_from_units_proxy,
-            unit_messages_for_units_proxy,
         }
     }
 }
 
-impl<H, D, DP, MK, SH, NH, RF> InitializedMember<'static, H, D, DP, MK, SH, NH, RF>
+impl<H, D, DP, MK, SH, HL> InitializedMember<'static, H, D, DP, MK, SH, HL>
 where
     H: Hasher,
     D: Data,
     DP: DataIO<D> + Send + 'static,
     MK: MultiKeychain,
     SH: SpawnHandle,
-    RF: Future<Output = ()>,
 {
     async fn run<N: Network<H, D, MK::Signature, MK::PartialMultisignature> + 'static>(
         &mut self,
@@ -517,25 +500,17 @@ where
         let (unit_messages_for_units_proxy, unit_messages_from_network_proxy) = mpsc::unbounded();
 
         // let (runway, request_checker) = Runway::new(
-        let runway = Runway::new(
+        let runway = RunwayFacade::new(
             self.config.clone(),
             self.keybox,
             self.data_io.take().unwrap(),
             self.spawn_handle.clone(),
             alert_messages_for_network,
             alert_messages_from_network,
-            unit_messages_from_network_proxy,
-            move |unit_message| {
-                unit_messages_for_network_proxy
-                    .unbounded_send(unit_message)
-                    .expect("proxy connection should be open");
-            },
         );
-        let request_tracker = runway.create_request_tracker();
 
         let mut initialized_member = InitializedMember::new(
             self,
-            request_tracker,
             runway,
             unit_messages_for_network,
             unit_messages_from_network,

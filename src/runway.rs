@@ -1,5 +1,3 @@
-use std::{cell::RefCell, sync::Arc};
-
 use crate::{
     alerts::{Alert, AlertConfig, AlertMessage, Alerter, ForkProof, ForkingNotification},
     consensus::Consensus,
@@ -14,58 +12,94 @@ use crate::{
 };
 use futures::{
     channel::{mpsc, oneshot},
-    StreamExt,
+    Stream, StreamExt,
 };
 use log::{debug, error, info, trace, warn};
-use parking_lot::RwLock;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
-pub(crate) struct RequestTracker<'a, H, D, MK>
-where
-    H: Hasher,
-    D: Data,
-    MK: MultiKeychain,
-{
-    store: &'a UnitStore<H, D, MK>,
-}
-
-impl<'a, H: Hasher, D: Data, MK: MultiKeychain> RequestTracker<'a, H, D, MK> {
-    fn new(store: &'a UnitStore<H, D, MK>) -> Self {
-        RequestTracker { store }
-    }
-
-    pub(crate) fn missing_parents(&self, u_hash: &H::Hash) -> bool {
-        self.store.read().get_parents(*u_hash).is_none()
-    }
-
-    pub(crate) fn missing_coords(&self, coord: &UnitCoord) -> bool {
-        !self.store.read().contains_coord(coord)
-    }
-
-    // pub(crate) async fn next_request(
-    //     &self,
-    // ) -> (UnitMessage<H, D, MK::Signature>, Option<Recipient>) {
-    //     self.receiver.next().await
-    // }
-}
-
-// impl<H: Hasher, D: Data, MK: MultiKeychain> Stream for RequestChecker<H, D, MK> {
-//     type Item = (UnitMessage<H, D, MK::Signature>, Option<Recipient>);
-
-//     fn poll_next(
-//         self: std::pin::Pin<&mut Self>,
-//         cx: &mut std::task::Context<'_>,
-//     ) -> std::task::Poll<Option<Self::Item>> {
-//         self.receiver.poll_next_unpin(cx)
-//     }
-// }
-
-pub(crate) struct Runway<'a, H, D, MK, DP, NH, SH>
+pub(crate) struct RunwayFacade<'a, H, D, MK, DP, SH, HL>
 where
     H: Hasher,
     D: Data,
     MK: MultiKeychain,
     DP: DataIO<D>,
-    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)) + 'a,
+    SH: SpawnHandle,
+{
+    runway: Runway<'a, H, D, MK, DP, SH, HL>,
+    outgoing_messages: Receiver<UnitMessage<H, D, MK::Signature>>,
+    incoming_messages: Sender<UnitMessage<H, D, MK::Signature>>,
+    store: Arc<RwLock<UnitStore<H, D, MK>>>,
+}
+
+impl<'a, H, D, MK, DP, SH, HL> RunwayFacade<'a, H, D, MK, DP, SH, HL>
+where
+    H: Hasher,
+    D: Data,
+    MK: MultiKeychain,
+    DP: DataIO<D>,
+    SH: SpawnHandle,
+{
+    pub(crate) fn new<HLL: Stream<Item = ()>>(
+        config: Config,
+        keychain: &'a MK,
+        data_io: DP,
+        spawn_handle: SH,
+        alert_messages_for_network: Sender<(
+            AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
+            Recipient,
+        )>,
+        alert_messages_from_network: Receiver<
+            AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
+        >,
+    ) -> RunwayFacade<'a, H, D, MK, DP, SH, HLL> {
+        let (unit_messages_for_units, unit_messages_from_network) = mpsc::unbounded();
+        let (unit_messages_for_network, unit_messages_from_units) = mpsc::unbounded();
+        let runway = Runway::new(
+            config,
+            keychain,
+            data_io,
+            spawn_handle,
+            alert_messages_for_network,
+            alert_messages_from_network,
+            unit_messages_from_network,
+            unit_messages_for_network,
+        );
+        RunwayFacade {
+            runway,
+            outgoing_messages: unit_messages_from_units,
+            incoming_messages: unit_messages_for_units,
+            store: runway.store.clone(),
+        }
+    }
+
+    pub(crate) async fn enqueue_message(&mut self, message: UnitMessage<H, D, MK::Signature>) {
+        self.incoming_messages.unbounded_send(message)
+    }
+
+    pub(crate) async fn next_outgoing_message(
+        &mut self,
+    ) -> Option<UnitMessage<H, D, MK::Signature>> {
+        self.outgoing_messages.await
+    }
+
+    pub(crate) async fn missing_parents(&self, u_hash: &H::Hash) -> bool {
+        self.store.read().await.get_parents(*u_hash).is_none()
+    }
+
+    pub(crate) async fn missing_coords(&self, coord: &UnitCoord) -> bool {
+        !self.store.read().await.contains_coord(coord)
+    }
+
+    pub(crate) async fn exit() {}
+}
+
+pub(crate) struct Runway<'a, H, D, MK, DP, SH, HL>
+where
+    H: Hasher,
+    D: Data,
+    MK: MultiKeychain,
+    DP: DataIO<D>,
     SH: SpawnHandle,
 {
     config: Config,
@@ -74,26 +108,26 @@ where
     alerts_for_alerter: Sender<Alert<H, D, MK::Signature>>,
     notifications_from_alerter: Receiver<ForkingNotification<H, D, MK::Signature>>,
     unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
+    unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
     tx_consensus: Sender<NotificationIn<H>>,
     rx_consensus: Receiver<NotificationOut<H>>,
     ordered_batch_rx: Receiver<Vec<H::Hash>>,
-    notification_handler: NH,
     data_io: DP,
     spawn_handle: SH,
-    alerter: Option<Alerter<'a, H, D, MK>>,
-    consensus: Option<Consensus<H, SH>>,
+    consensus_handle: HL,
+    alerter_handle: HL,
 }
 
-impl<'a, H, D, MK, DP, NH, SH> Runway<'a, H, D, MK, DP, NH, SH>
+impl<'a, H, D, MK, DP, SH, HL> Runway<'a, H, D, MK, DP, SH, HL>
 where
     H: Hasher,
     D: Data,
     MK: MultiKeychain,
     DP: DataIO<D>,
-    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
     SH: SpawnHandle,
+    HL: Stream<Item = ()>,
 {
-    pub(crate) fn new(
+    pub(crate) fn new<HLL: Stream<Item = ()>>(
         config: Config,
         keychain: &'a MK,
         data_io: DP,
@@ -106,8 +140,8 @@ where
             AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
         >,
         unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
-        handler: NH,
-    ) -> Self {
+        unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
+    ) -> Runway<'a, H, D, MK, DP, SH, HLL> {
         let (tx_consensus, consensus_stream) = mpsc::unbounded();
         let (consensus_sink, rx_consensus) = mpsc::unbounded();
         let (ordered_batch_tx, ordered_batch_rx) = mpsc::unbounded();
@@ -136,30 +170,39 @@ where
             ordered_batch_tx,
         );
 
+        let (alerter_exit, exit_stream) = oneshot::channel();
+        let alerter_handle = spawn_handle.spawn_essential("runway/alerter", async move {
+            alerter.run(exit_stream).await;
+        });
+        let alerter_handle = into_infinite_stream(alerter_handle);
+
+        let (consensus_exit, exit_stream) = oneshot::channel();
+        let consensus_handle = spawn_handle.spawn_essential("runway/consensus", async move {
+            consensus.run(exit_stream).await;
+        });
+        let consensus_handle = into_infinite_stream(consensus_handle);
+
         let n_members = config.n_members;
         let threshold = (n_members * 2) / 3 + NodeCount(1);
         let max_round = config.max_round;
         let store = Arc::new(RwLock::new(UnitStore::new(n_members, threshold, max_round)));
+
         Runway {
             config,
             store,
             keybox: keychain,
             alerts_for_alerter,
             notifications_from_alerter,
-            alerter: Some(alerter),
             tx_consensus,
             rx_consensus,
-            consensus: Some(consensus),
             data_io,
             unit_messages_from_network,
+            unit_messages_for_network,
             spawn_handle,
             ordered_batch_rx,
-            notification_handler: handler,
+            alerter_handle,
+            consensus_handle,
         }
-    }
-
-    pub(crate) fn create_request_tracker(&self) -> RequestTracker<'a, H, D, MK> {
-        RequestTracker::new(&self.store)
     }
 
     fn index(&self) -> NodeIndex {
@@ -196,7 +239,8 @@ where
                 if self.on_parents_response(u_hash, parents).is_err() {
                     let message =
                         UnitMessage::<H, D, MK::Signature>::RequestParents(self.index(), u_hash);
-                    (self.notification_handler)((message, None));
+                    self.unit_messages_for_network
+                        .unbounded_send((message, Recipient::Everyone));
                 }
             }
         }
@@ -360,7 +404,8 @@ where
     }
 
     fn send_unit_message(&mut self, message: UnitMessage<H, D, MK::Signature>, peer_id: NodeIndex) {
-        (self.notification_handler)((message, Some(Recipient::Node(peer_id))));
+        self.unit_messages_for_network
+            .unbounded_send(message, Recipient::Node(peer_id))
     }
 
     fn on_request_parents(&mut self, peer_id: NodeIndex, u_hash: H::Hash) {
@@ -513,7 +558,8 @@ where
 
         let message = UnitMessage::<H, D, MK::Signature>::NewUnit(signed_unit.into());
         trace!(target: "AlephBFT-runway", "{:?} Sending a unit {:?}.", self.index(), hash);
-        (self.notification_handler)((message, Some(Recipient::Everyone)));
+        self.unit_messages_for_network
+            .unbounded_send(message, Recipient::Everyone)
     }
 
     fn on_missing_coords(&mut self, mut coords: Vec<UnitCoord>) {
@@ -521,7 +567,8 @@ where
         coords.retain(|coord| !self.store.read().contains_coord(coord));
         for coord in coords {
             let message = UnitMessage::<H, D, MK::Signature>::RequestCoord(self.index(), coord);
-            (self.notification_handler)((message, None));
+            self.unit_messages_for_network
+                .unbounded_send(message, Recipient::Everyone)
         }
     }
 
@@ -536,7 +583,8 @@ where
             notification = Some(NotificationIn::UnitParents(u_hash, p_hashes));
         } else {
             let message = UnitMessage::<H, D, MK::Signature>::RequestParents(self.index(), u_hash);
-            (self.notification_handler)((message, None));
+            self.unit_messages_for_network
+                .unbounded_send(message, Recipient::Everyone);
         }
         if let Some(notification) = notification {
             self.send_consensus_notification(notification);
@@ -579,11 +627,9 @@ where
     D: Data,
     MK: MultiKeychain,
     DP: DataIO<D>,
-    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)),
     SH: SpawnHandle,
 {
     pub(crate) async fn run(&mut self, mut exit: oneshot::Receiver<()>) {
-        // todo!("runway nie powinnien byc odpalany w osobnym watku od membera, tylko dzialac w tym samym i udostepniac wygodny interfejs dla niego");
         info!(target: "AlephBFT-runway", "{:?} Runway starting.", self.index());
 
         let index = self.index();
