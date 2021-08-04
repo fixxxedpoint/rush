@@ -1,9 +1,9 @@
 use crate::{
     config::Config,
     network::{NetworkHub, Recipient},
-    runway::{RequestTracker, Runway, RunwayFacade},
+    runway::{InitializedRunway, RunwayFacade},
     signed::Signature,
-    units::{PreUnit, UncheckedSignedUnit, Unit, UnitCoord, UnitStore},
+    units::{PreUnit, UncheckedSignedUnit, Unit, UnitCoord},
     Data, DataIO, Hasher, MultiKeychain, Network, NodeCount, NodeIndex, Receiver, Sender,
     SpawnHandle,
 };
@@ -11,13 +11,12 @@ use codec::{Decode, Encode};
 use futures::{
     channel::{mpsc, oneshot},
     future::ready,
-    pin_mut,
     stream::iter,
     Future, FutureExt, Stream, StreamExt,
 };
 use log::{debug, error, info, trace, warn};
 use rand::Rng;
-use std::{cell::RefCell, cmp::Ordering, collections::BinaryHeap, fmt::Debug, iter::repeat, time};
+use std::{cmp::Ordering, collections::BinaryHeap, fmt::Debug, iter::repeat, time};
 
 pub(crate) fn into_infinite_stream<F: Future>(f: F) -> impl Stream<Item = ()> {
     f.then(|_| ready(iter(repeat(())))).flatten_stream()
@@ -172,7 +171,7 @@ where
     }
 }
 
-struct InitializedMember<'a, H, D, DP, MK, SH, HL>
+struct InitializedMember<'a, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
@@ -181,39 +180,36 @@ where
     SH: SpawnHandle,
 {
     member: Member<'a, H, D, DP, MK, SH>,
-    runway_facade: RunwayFacade<'a, H, D, MK, DP, SH, HL>,
-    runway_exit: oneshot::Sender<()>,
+    runway_facade: RunwayFacade<H, D, MK>,
+    // runway_exit: oneshot::Sender<()>,
     unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
     unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
 }
 
-impl<'a, H, D, DP, MK, SH, RF> InitializedMember<'a, H, D, DP, MK, SH, RF>
+impl<'a, H, D, DP, MK, SH> InitializedMember<'a, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
     DP: DataIO<D> + Send,
     MK: MultiKeychain,
     SH: SpawnHandle,
-    RF: Future<Output = ()>,
 {
-    fn new<HL>(
+    fn new(
         member: Member<'a, H, D, DP, MK, SH>,
-        runway_facade: RunwayFacade<'a, H, D, MK, DP, SH, HL>,
+        runway_facade: RunwayFacade<H, D, MK>,
         unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
         unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
     ) -> Self {
-        let (runway_exit, exit_stream) = oneshot::channel();
         Self {
             member,
             runway_facade,
-            runway_exit: (),
             unit_messages_for_network,
             unit_messages_from_network,
         }
     }
 }
 
-impl<H, D, DP, MK, SH, HL> InitializedMember<'static, H, D, DP, MK, SH, HL>
+impl<H, D, DP, MK, SH> InitializedMember<'static, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
@@ -232,14 +228,15 @@ where
         let network_handle =
             self.member
                 .spawn_handle
-                .spawn_essential(
-                    "member/network",
-                    async move { network.run(exit_stream).await },
-                );
+                .spawn_essential("member/network", async move {
+                    network.run(exit_stream).await;
+                });
         let mut network_handle = into_infinite_stream(network_handle).fuse();
         info!(target: "AlephBFT-member", "{:?} Network spawned.", self.index());
 
         info!(target: "AlephBFT-member", "{:?} Initializing Runway.", self.index());
+
+        // self.runway_facade.start();
         // let (runway_exit, exit_stream) = oneshot::channel();
         // // TODO dodaj metodę ktora zajmuje sie jedynie pchanie do przodu runway
         // let runway_handle = self.runway.run(exit_stream);
@@ -251,10 +248,11 @@ where
         info!(target: "AlephBFT-member", "{:?} Runway initialized.", index);
 
         loop {
+            // todo!("use new runway-facade here");
             futures::select! {
-                event = self.unit_messages_from_units_proxy.next() => match event {
+                event = self.runway_facade.next_outgoing_message().fuse() => match event {
                     Some((message, recipient)) => {
-                        self.on_unit_message_from_units(message, recipient);
+                        self.on_unit_message_from_units(message, Some(recipient));
                     },
                     None => {
                         error!(target: "AlephBFT-member", "{:?} Unit message stream from Runway closed.", index);
@@ -262,19 +260,14 @@ where
                     },
                 },
 
-                event = self.unit_messages_from_network.next() => match event {
+                event = self.unit_messages_from_network.next().fuse() => match event {
                     Some(message) => {
-                        self.unit_messages_for_units_proxy.unbounded_send(message).expect("Runway should be open.");
+                        self.runway_facade.enqueue_message(message).await;
                     },
                     None => {
                         error!(target: "AlephBFT-member", "{:?} Unit message stream from network closed.", index);
                         break;
                     },
-                },
-
-                _ = runway_handle.next() => {
-                    debug!(target: "AlephBFT-member", "{:?} runway task terminated early.", index);
-                    break;
                 },
 
                 _ = network_handle.next() => {
@@ -285,10 +278,6 @@ where
                 _ = &mut exit => break,
             }
         }
-        if runway_exit.send(()).is_err() {
-            debug!(target: "AlephBFT-member", "{:?} runway already stopped.", index);
-        }
-        runway_handle.next().await.unwrap();
         if network_exit.send(()).is_err() {
             debug!(target: "AlephBFT-member", "{:?} network already stopped.", index);
         }
@@ -297,14 +286,13 @@ where
     }
 }
 
-impl<'a, H, D, DP, MK, SH, NH> InitializedMember<'a, H, D, DP, MK, SH, NH>
+impl<'a, H, D, DP, MK, SH> InitializedMember<'a, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
     DP: 'static + DataIO<D> + Send,
     MK: MultiKeychain,
     SH: SpawnHandle,
-    NH: FnMut((UnitMessage<H, D, MK::Signature>, Option<Recipient>)) + 'a,
 {
     fn on_create(&mut self, u: UncheckedSignedUnit<H, D, MK::Signature>) {
         let index = self.member.scheduled_units.len();
@@ -375,8 +363,8 @@ where
             .expect("Channel to network should be open")
     }
 
-    fn schedule_parents_request(&mut self, u_hash: H::Hash, curr_time: time::Instant) {
-        if self.request_checker.missing_parents(&u_hash) {
+    async fn schedule_parents_request(&mut self, u_hash: H::Hash, curr_time: time::Instant) {
+        if self.runway_facade.missing_parents(&u_hash).await {
             let message = UnitMessage::<H, D, MK::Signature>::RequestParents(self.index(), u_hash);
             let peer_id = self.random_peer();
             self.send_unit_message(message, peer_id);
@@ -391,11 +379,11 @@ where
         }
     }
 
-    fn schedule_coord_request(&mut self, coord: UnitCoord, curr_time: time::Instant) {
+    async fn schedule_coord_request(&mut self, coord: UnitCoord, curr_time: time::Instant) {
         trace!(target: "AlephBFT-member", "{:?} Starting request for {:?}", self.index(), coord);
         // If we already received or never asked for such coord then there is no need to request it.
         // It will be sent to consensus soon (or have already been sent).
-        if !self.request_checker.missing_coords(&coord) {
+        if !self.runway_facade.missing_coords(&coord).await {
             trace!(target: "AlephBFT-member", "{:?} Request dropped as the unit is in store already {:?}", self.index(), coord);
             return;
         }
@@ -467,9 +455,9 @@ impl<H, D, DP, MK, SH> Member<'static, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
-    DP: DataIO<D> + Send + 'static,
+    DP: DataIO<D> + Send + Sync + 'static,
     MK: MultiKeychain,
-    SH: SpawnHandle,
+    SH: SpawnHandle + Sync,
 {
     /// Actually start the Member as an async task. It stops establishing consensus for new data items after
     /// reaching the threshold specified in [`Config::max_round`] or upon receiving a stop signal from `exit`.
@@ -496,11 +484,7 @@ where
             alert_messages_for_alerter,
         );
 
-        let (unit_messages_for_network_proxy, unit_messages_from_units_proxy) = mpsc::unbounded();
-        let (unit_messages_for_units_proxy, unit_messages_from_network_proxy) = mpsc::unbounded();
-
-        // let (runway, request_checker) = Runway::new(
-        let runway = RunwayFacade::new(
+        let runway = InitializedRunway::new(
             self.config.clone(),
             self.keybox,
             self.data_io.take().unwrap(),
@@ -508,14 +492,16 @@ where
             alert_messages_for_network,
             alert_messages_from_network,
         );
+        let runway = runway.start();
+        // todo!(
+        //     "start runway (which should return a RunwayFacade) before passing to InitializedMember"
+        // );
 
         let mut initialized_member = InitializedMember::new(
             self,
             runway,
             unit_messages_for_network,
             unit_messages_from_network,
-            unit_messages_from_units_proxy,
-            unit_messages_for_units_proxy,
         );
 
         info!(target: "AlephBFT-member", "{:?} Running member.", index);
