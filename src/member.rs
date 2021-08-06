@@ -262,7 +262,7 @@ where
 
                 event = self.unit_messages_from_network.next().fuse() => match event {
                     Some(message) => {
-                        self.runway_facade.enqueue_message(message).await;
+                        self.runway_facade.enqueue_message(message);
                     },
                     None => {
                         error!(target: "AlephBFT-member", "{:?} Unit message stream from network closed.", index);
@@ -455,9 +455,9 @@ impl<H, D, DP, MK, SH> Member<'static, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
-    DP: DataIO<D> + Send + Sync + 'static,
+    DP: DataIO<D> + Send + 'static,
     MK: MultiKeychain,
-    SH: SpawnHandle + Sync,
+    SH: SpawnHandle,
 {
     /// Actually start the Member as an async task. It stops establishing consensus for new data items after
     /// reaching the threshold specified in [`Config::max_round`] or upon receiving a stop signal from `exit`.
