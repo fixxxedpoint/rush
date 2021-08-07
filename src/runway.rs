@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use crate::{
     alerts::{Alert, AlertConfig, AlertMessage, Alerter, ForkProof, ForkingNotification},
@@ -325,6 +328,7 @@ where
     ordered_batch_rx: Receiver<Vec<H::Hash>>,
     data_io: DP,
     spawn_handle: SH,
+    request_tracker: RequestTracker<H>,
 }
 
 impl<'a, H, D, MK, DP, SH> Runway<'a, H, D, MK, DP, SH>
@@ -389,6 +393,8 @@ where
             if alert {
                 // Units from alerts explicitly come from forkers, and we want them anyway.
                 self.store.add_unit(su, true);
+                self.request_tracker
+                    .coordinates_resolved(su.as_signable().coord());
             } else {
                 self.add_unit_to_store_unless_fork(su);
             }
@@ -457,6 +463,8 @@ where
         let rounds_margin = self.config.rounds_margin;
         if u_round <= round_in_progress + rounds_margin {
             self.store.add_unit(su, false);
+            self.request_tracker
+                .coordinates_resolved(su.as_signable().coord());
         } else {
             warn!(target: "AlephBFT-runway", "{:?} Unit {:?} ignored because of too high round {} when round in progress is {}.", self.index(), full_unit, u_round, round_in_progress);
         }
@@ -632,6 +640,7 @@ where
         }
         let p_hashes: Vec<H::Hash> = p_hashes_node_map.into_iter().flatten().collect();
         self.store.add_parents(u_hash, p_hashes.clone());
+        self.request_tracker.parents_resolved(u_hash);
         trace!(target: "AlephBFT-runway", "{:?} Succesful parents reponse for {:?}.", self.index(), u_hash);
         self.send_consensus_notification(NotificationIn::UnitParents(u_hash, p_hashes));
         Ok(())
@@ -678,6 +687,7 @@ where
             }
             NotificationOut::AddedToDag(h, p_hashes) => {
                 self.store.add_parents(h, p_hashes);
+                self.request_tracker.parents_resolved(u_hash);
             }
         }
     }
@@ -856,5 +866,68 @@ where
         alerter_handle.next().await.unwrap();
 
         info!(target: "AlephBFT-runway", "{:?} Run ended.", index);
+    }
+}
+
+#[derive(Clone)]
+struct Request {
+    satisfied: Arc<AtomicBool>,
+}
+
+impl Request {
+    fn new() -> Self {
+        Request {
+            satisfied: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn is_satisfied(&self) -> bool {
+        self.satisfied.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set_satisfied(&mut self) {
+        self.satisfied
+            .store(true, std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+struct RequestTracker<H: Hasher> {
+    missing_coords: HashMap<UnitCoord, Vec<Request>>,
+    missing_parents: HashMap<H::Hash, Vec<Request>>,
+}
+
+impl<H: Hasher> RequestTracker<H> {
+    fn new_missing_coords_request(&mut self, coord: &UnitCoord) -> Request {
+        let request = Request::new();
+        self.missing_coords
+            .entry(coord)
+            .or_default()
+            .push(request.clone());
+        request
+    }
+
+    fn new_missing_parents_request(&mut self, u_hash: &H::Hash) -> Request {
+        let request = Request::new();
+        self.missing_parents
+            .entry(u_hash)
+            .or_default()
+            .push(request.clone());
+        request
+    }
+
+    fn parents_resolved(&mut self, u_hash: &H::Hash) {
+        let request = self.missing_parents.remove(u_hash);
+        request
+            .into_iter()
+            .flatten()
+            .for_each(|r| r.set_satisfied());
+    }
+
+    fn coordinates_resolved(&mut self, coord: &UnitCoord) {
+        let request = self.missing_coords.remove(coord);
+        request
+            .into_iter()
+            .flatten()
+            .for_each(|r| r.set_satisfied());
     }
 }
