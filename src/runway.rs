@@ -22,6 +22,11 @@ use futures::{
 use log::{debug, error, info, trace, warn};
 use tokio::sync::Barrier;
 
+pub(crate) enum OutgoingMessage<M> {
+    WithTrackedRequest(TrackedRequest, M),
+    Raw(M),
+}
+
 pub(crate) struct RunwayFacade<H, D, MK>
 where
     H: Hasher,
@@ -31,10 +36,10 @@ where
     // runway: Runway<'a, H, D, MK, DP, SH>,
     runway_handle: TaskHandle,
     runway_exit: oneshot::Sender<()>,
-    outgoing_messages: Receiver<(UnitMessage<H, D, MK::Signature>, Recipient)>,
+    outgoing_messages: Receiver<OutgoingMessage<(UnitMessage<H, D, MK::Signature>, Recipient)>>,
     incoming_messages: Sender<UnitMessage<H, D, MK::Signature>>,
-    request_sender: Sender<TrackedRequest<H>>,
-    request_answer_receiver: Receiver<bool>,
+    missing_coords: HashMap<UnitCoord, TrackedRequest>,
+    missing_parents: HashMap<H::Hash, TrackedRequest>,
 }
 
 impl<H, D, MK> RunwayFacade<H, D, MK>
@@ -46,18 +51,16 @@ where
     fn new(
         runway_handle: TaskHandle,
         runway_exit: oneshot::Sender<()>,
-        outgoing_messages: Receiver<(UnitMessage<H, D, MK::Signature>, Recipient)>,
+        outgoing_messages: Receiver<OutgoingMessage<(UnitMessage<H, D, MK::Signature>, Recipient)>>,
         incoming_messages: Sender<UnitMessage<H, D, MK::Signature>>,
-        request_sender: Sender<TrackedRequest<H>>,
-        request_answer_receiver: Receiver<bool>,
     ) -> Self {
         RunwayFacade {
             runway_handle,
             runway_exit,
             outgoing_messages,
             incoming_messages,
-            request_sender,
-            request_answer_receiver,
+            missing_coords: HashMap::new(),
+            missing_parents: HashMap::new(),
         }
     }
 
@@ -103,25 +106,53 @@ where
     pub(crate) async fn next_outgoing_message(
         &mut self,
     ) -> Option<(UnitMessage<H, D, MK::Signature>, Recipient)> {
-        self.outgoing_messages.next().await
+        let out_msg = self.outgoing_messages.next().await;
+        match out_msg {
+            Some(out_msg) => match out_msg {
+                OutgoingMessage::WithTrackedRequest(request, out_msg) => {
+                    match out_msg.0 {
+                        UnitMessage::RequestCoord(_, ref coord) => {
+                            self.missing_coords.insert(*coord, request);
+                        }
+                        UnitMessage::RequestParents(_, ref u_hash) => {
+                            self.missing_parents.insert(*u_hash, request);
+                        }
+                        _ => {}
+                    }
+                    Some(out_msg)
+                }
+                OutgoingMessage::Raw(out_msg) => Some(out_msg),
+            },
+            None => None,
+        }
     }
 
-    pub(crate) async fn missing_parents(&mut self, u_hash: &H::Hash) -> bool {
-        let challenge = TrackedRequest::MissingParents(*u_hash);
-        self.request_sender.unbounded_send(challenge);
-        self.request_answer_receiver
-            .next()
-            .await
-            .expect("answer should be sent before being dropped")
+    pub(crate) fn missing_parents(&mut self, u_hash: &H::Hash) -> bool {
+        match self.missing_parents.get(u_hash) {
+            Some(r) => {
+                if r.is_satisfied() {
+                    self.missing_parents.remove(u_hash);
+                    false
+                } else {
+                    true
+                }
+            }
+            None => true,
+        }
     }
 
-    pub(crate) async fn missing_coords(&mut self, coord: &UnitCoord) -> bool {
-        let challenge = TrackedRequest::MissingCoords(*coord);
-        self.request_sender.unbounded_send(challenge);
-        self.request_answer_receiver
-            .next()
-            .await
-            .expect("answer should be sent before being dropped")
+    pub(crate) fn missing_coords(&mut self, coord: &UnitCoord) -> bool {
+        match self.missing_coords.get(coord) {
+            Some(r) => {
+                if r.is_satisfied() {
+                    self.missing_coords.remove(coord);
+                    false
+                } else {
+                    true
+                }
+            }
+            None => true,
+        }
     }
 
     pub(crate) async fn stop(self) {
@@ -129,41 +160,6 @@ where
             warn!(target: "AlephBFT-runway", "runway already stopped");
         }
         self.runway_handle.await;
-    }
-}
-
-pub(crate) enum TrackedRequest<H: Hasher> {
-    MissingParents(H::Hash),
-    MissingCoords(UnitCoord),
-}
-
-pub(crate) struct TrackedRequestQuestion<H: Hasher> {
-    request: TrackedRequest<H>,
-    answer: Sender<bool>,
-}
-
-impl<H: Hasher> TrackedRequestQuestion<H> {
-    fn new(request: TrackedRequest<H>, answer_channel: Sender<bool>) -> Self {
-        TrackedRequestQuestion {
-            request,
-            answer: answer_channel,
-        }
-    }
-
-    fn request(&self) -> &TrackedRequest<H> {
-        &self.request
-    }
-
-    fn valid(&mut self) {
-        self.answer
-            .unbounded_send(true)
-            .expect("answer channel should be open")
-    }
-
-    fn not_valid(&mut self) {
-        self.answer
-            .unbounded_send(false)
-            .expect("answer channel should be open")
     }
 }
 
@@ -178,10 +174,8 @@ where
     runway: Runway<'a, H, D, MK, DP, SH>,
     alerter: Alerter<'a, H, D, MK>,
     consensus: Consensus<H, SH>,
-    outgoing_messages: Receiver<(UnitMessage<H, D, MK::Signature>, Recipient)>,
+    outgoing_messages: Receiver<OutgoingMessage<(UnitMessage<H, D, MK::Signature>, Recipient)>>,
     incoming_messages: Sender<UnitMessage<H, D, MK::Signature>>,
-    rx_request_answer: Receiver<bool>,
-    tx_requests: Sender<TrackedRequest<H>>,
 }
 
 impl<'a, H, D, MK, DP, SH> InitializedRunway<'a, H, D, MK, DP, SH>
@@ -240,9 +234,6 @@ where
         let max_round = config.max_round;
         let store = UnitStore::new(n_members, threshold, max_round);
 
-        let (tx_requests, rx_requests) = mpsc::unbounded();
-        let (tx_request_answer, rx_request_answer) = mpsc::unbounded();
-
         let runway = Runway {
             config,
             store,
@@ -251,13 +242,12 @@ where
             notifications_from_alerter,
             tx_consensus,
             rx_consensus,
-            tx_request_answer,
-            rx_requests,
             data_io,
             unit_messages_from_network,
             unit_messages_for_network,
             spawn_handle,
             ordered_batch_rx,
+            request_tracker: RequestTracker::new(),
         };
         InitializedRunway {
             runway,
@@ -265,8 +255,6 @@ where
             consensus,
             outgoing_messages: unit_messages_from_units,
             incoming_messages: unit_messages_for_units,
-            rx_request_answer,
-            tx_requests,
         }
     }
 }
@@ -295,8 +283,6 @@ where
             runway_exit,
             outgoing_messages,
             incoming_messages,
-            self.tx_requests,
-            self.rx_request_answer,
         )
     }
 
@@ -320,11 +306,10 @@ where
     alerts_for_alerter: Sender<Alert<H, D, MK::Signature>>,
     notifications_from_alerter: Receiver<ForkingNotification<H, D, MK::Signature>>,
     unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
-    unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
+    unit_messages_for_network:
+        Sender<OutgoingMessage<(UnitMessage<H, D, MK::Signature>, Recipient)>>,
     tx_consensus: Sender<NotificationIn<H>>,
     rx_consensus: Receiver<NotificationOut<H>>,
-    tx_request_answer: Sender<bool>,
-    rx_requests: Receiver<TrackedRequest<H>>,
     ordered_batch_rx: Receiver<Vec<H::Hash>>,
     data_io: DP,
     spawn_handle: SH,
@@ -373,8 +358,12 @@ where
                 if self.on_parents_response(u_hash, parents).is_err() {
                     let message =
                         UnitMessage::<H, D, MK::Signature>::RequestParents(self.index(), u_hash);
-                    self.unit_messages_for_network
-                        .unbounded_send((message, Recipient::Everyone));
+                    self.unit_messages_for_network.unbounded_send(
+                        OutgoingMessage::WithTrackedRequest(
+                            self.request_tracker.new_missing_parents_request(&u_hash),
+                            (message, Recipient::Everyone),
+                        ),
+                    );
                 }
             }
         }
@@ -392,9 +381,9 @@ where
         if let Some(su) = self.validate_unit(uu) {
             if alert {
                 // Units from alerts explicitly come from forkers, and we want them anyway.
-                self.store.add_unit(su, true);
                 self.request_tracker
-                    .coordinates_resolved(su.as_signable().coord());
+                    .coordinates_resolved(&su.as_signable().coord());
+                self.store.add_unit(su, true);
             } else {
                 self.add_unit_to_store_unless_fork(su);
             }
@@ -462,9 +451,9 @@ where
         let round_in_progress = self.store.get_round_in_progress();
         let rounds_margin = self.config.rounds_margin;
         if u_round <= round_in_progress + rounds_margin {
-            self.store.add_unit(su, false);
             self.request_tracker
-                .coordinates_resolved(su.as_signable().coord());
+                .coordinates_resolved(&su.as_signable().coord());
+            self.store.add_unit(su, false);
         } else {
             warn!(target: "AlephBFT-runway", "{:?} Unit {:?} ignored because of too high round {} when round in progress is {}.", self.index(), full_unit, u_round, round_in_progress);
         }
@@ -543,7 +532,7 @@ where
 
     fn send_unit_message(&mut self, message: UnitMessage<H, D, MK::Signature>, peer_id: NodeIndex) {
         self.unit_messages_for_network
-            .unbounded_send((message, Recipient::Node(peer_id)))
+            .unbounded_send(OutgoingMessage::Raw((message, Recipient::Node(peer_id))))
             .expect("network's channel should be open")
     }
 
@@ -640,7 +629,7 @@ where
         }
         let p_hashes: Vec<H::Hash> = p_hashes_node_map.into_iter().flatten().collect();
         self.store.add_parents(u_hash, p_hashes.clone());
-        self.request_tracker.parents_resolved(u_hash);
+        self.request_tracker.parents_resolved(&u_hash);
         trace!(target: "AlephBFT-runway", "{:?} Succesful parents reponse for {:?}.", self.index(), u_hash);
         self.send_consensus_notification(NotificationIn::UnitParents(u_hash, p_hashes));
         Ok(())
@@ -687,7 +676,7 @@ where
             }
             NotificationOut::AddedToDag(h, p_hashes) => {
                 self.store.add_parents(h, p_hashes);
-                self.request_tracker.parents_resolved(u_hash);
+                self.request_tracker.parents_resolved(&h);
             }
         }
     }
@@ -703,7 +692,7 @@ where
         let message = UnitMessage::<H, D, MK::Signature>::NewUnit(signed_unit.into());
         trace!(target: "AlephBFT-runway", "{:?} Sending a unit {:?}.", self.index(), hash);
         self.unit_messages_for_network
-            .unbounded_send((message, Recipient::Everyone))
+            .unbounded_send(OutgoingMessage::Raw((message, Recipient::Everyone)))
             .expect("network's channel should be open")
     }
 
@@ -713,8 +702,11 @@ where
         for coord in coords {
             let message = UnitMessage::<H, D, MK::Signature>::RequestCoord(self.index(), coord);
             self.unit_messages_for_network
-                .unbounded_send((message, Recipient::Everyone))
-                .expect("network's channel should be open")
+                .unbounded_send(OutgoingMessage::WithTrackedRequest(
+                    self.request_tracker.new_missing_coords_request(&coord),
+                    (message, Recipient::Everyone),
+                ))
+                .expect("network's channel should be open");
         }
     }
 
@@ -730,7 +722,10 @@ where
         } else {
             let message = UnitMessage::<H, D, MK::Signature>::RequestParents(self.index(), u_hash);
             self.unit_messages_for_network
-                .unbounded_send((message, Recipient::Everyone))
+                .unbounded_send(OutgoingMessage::WithTrackedRequest(
+                    self.request_tracker.new_missing_parents_request(&u_hash),
+                    (message, Recipient::Everyone),
+                ))
                 .expect("network's channel should be open");
         }
         if let Some(notification) = notification {
@@ -870,13 +865,13 @@ where
 }
 
 #[derive(Clone)]
-struct Request {
+pub(crate) struct TrackedRequest {
     satisfied: Arc<AtomicBool>,
 }
 
-impl Request {
+impl TrackedRequest {
     fn new() -> Self {
-        Request {
+        TrackedRequest {
             satisfied: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -892,42 +887,43 @@ impl Request {
 }
 
 struct RequestTracker<H: Hasher> {
-    missing_coords: HashMap<UnitCoord, Vec<Request>>,
-    missing_parents: HashMap<H::Hash, Vec<Request>>,
+    missing_coords: HashMap<UnitCoord, TrackedRequest>,
+    missing_parents: HashMap<H::Hash, TrackedRequest>,
 }
 
 impl<H: Hasher> RequestTracker<H> {
-    fn new_missing_coords_request(&mut self, coord: &UnitCoord) -> Request {
-        let request = Request::new();
-        self.missing_coords
-            .entry(coord)
-            .or_default()
-            .push(request.clone());
-        request
+    fn new() -> Self {
+        RequestTracker {
+            missing_coords: HashMap::new(),
+            missing_parents: HashMap::new(),
+        }
     }
 
-    fn new_missing_parents_request(&mut self, u_hash: &H::Hash) -> Request {
-        let request = Request::new();
+    fn new_missing_coords_request(&mut self, coord: &UnitCoord) -> TrackedRequest {
+        self.missing_coords
+            .entry(*coord)
+            .or_insert_with(TrackedRequest::new)
+            .clone()
+    }
+
+    fn new_missing_parents_request(&mut self, u_hash: &H::Hash) -> TrackedRequest {
         self.missing_parents
-            .entry(u_hash)
-            .or_default()
-            .push(request.clone());
-        request
+            .entry(*u_hash)
+            .or_insert_with(TrackedRequest::new)
+            .clone()
     }
 
     fn parents_resolved(&mut self, u_hash: &H::Hash) {
-        let request = self.missing_parents.remove(u_hash);
-        request
+        self.missing_parents
+            .remove(u_hash)
             .into_iter()
-            .flatten()
-            .for_each(|r| r.set_satisfied());
+            .for_each(|mut req| req.set_satisfied());
     }
 
     fn coordinates_resolved(&mut self, coord: &UnitCoord) {
-        let request = self.missing_coords.remove(coord);
-        request
+        self.missing_coords
+            .remove(coord)
             .into_iter()
-            .flatten()
-            .for_each(|r| r.set_satisfied());
+            .for_each(|mut req| req.set_satisfied())
     }
 }
