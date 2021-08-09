@@ -325,9 +325,7 @@ where
         match message {
             NewUnit(u) => {
                 trace!(target: "AlephBFT-runway", "{:?} New unit received {:?}.", self.index(), &u);
-                if self.on_unit_received(u, false).is_err() {
-                    debug!(target: "AlephBFT-runway", "{:?} Failed to process a received unit.", self.index());
-                }
+                self.on_unit_received(u, false)
             }
             RequestCoord(peer_id, coord) => {
                 self.on_request_coord(peer_id, coord);
@@ -336,9 +334,7 @@ where
                 trace!(target: "AlephBFT-runway", "{:?} Fetch response received {:?}.", self.index(), &u);
                 // todo!("request again if invalid");
                 let coord = u.as_signable().coord();
-                if self.on_unit_received(u, false).is_err() {
-                    self.on_missing_coords([coord].into())
-                }
+                self.on_unit_received(u, false)
             }
             RequestParents(peer_id, u_hash) => {
                 trace!(target: "AlephBFT-runway", "{:?} Parents request received {:?}.", self.index(), u_hash);
@@ -346,30 +342,12 @@ where
             }
             ResponseParents(u_hash, parents) => {
                 trace!(target: "AlephBFT-runway", "{:?} Response parents received {:?}.", self.index(), u_hash);
-                // todo!("request again if invalid");
-                if self.on_parents_response(u_hash, parents).is_err() {
-                    let message =
-                        UnitMessage::<H, D, MK::Signature>::RequestParents(self.index(), u_hash);
-                    self.unit_messages_for_network.unbounded_send(
-                        OutgoingMessage::WithTrackedRequest(
-                            self.request_tracker.new_missing_parents_request(&u_hash),
-                            (message, Recipient::Everyone),
-                        ),
-                    );
-                }
+                self.on_parents_response(u_hash, parents);
             }
         }
     }
 
-    fn on_unit_received(
-        &mut self,
-        uu: UncheckedSignedUnit<H, D, MK::Signature>,
-        alert: bool,
-    ) -> Result<(), ()> {
-        // todo!();
-        if self.store.contains_coord(&uu.as_signable().coord()) {
-            return Ok(());
-        }
+    fn on_unit_received(&mut self, uu: UncheckedSignedUnit<H, D, MK::Signature>, alert: bool) {
         if let Some(su) = self.validate_unit(uu) {
             if alert {
                 // Units from alerts explicitly come from forkers, and we want them anyway.
@@ -379,9 +357,6 @@ where
             } else {
                 self.add_unit_to_store_unless_fork(su);
             }
-            return Ok(());
-        } else {
-            return Err(());
         }
     }
 
@@ -426,11 +401,9 @@ where
             trace!(target: "AlephBFT-runway", "{:?} Ignoring forker's unit {:?}", self.index(), full_unit);
             return;
         }
-        let sv = self.store.is_new_fork(full_unit);
-        if let Some(sv) = sv {
+        if let Some(sv) = self.store.is_new_fork(full_unit) {
             let creator = full_unit.creator();
-            let is_forker = self.store.is_forker(creator);
-            if !is_forker {
+            if !self.store.is_forker(creator) {
                 // We need to mark the forker if it is not known yet.
                 let proof = (su.into(), sv.into());
                 self.on_new_forker_detected(creator, proof);
@@ -549,12 +522,10 @@ where
                     return;
                 }
             }
-            message = Some(UnitMessage::ResponseParents(u_hash, full_units));
+            let message = UnitMessage::ResponseParents(u_hash, full_units);
+            self.send_unit_message(message, peer_id);
         } else {
             trace!(target: "AlephBFT-runway", "{:?} Not answering parents request for hash {:?}. Unit not in DAG yet.", self.index(), u_hash);
-        }
-        if let Some(message) = message {
-            self.send_unit_message(message, peer_id);
         }
     }
 
@@ -562,10 +533,10 @@ where
         &mut self,
         u_hash: H::Hash,
         parents: Vec<UncheckedSignedUnit<H, D, MK::Signature>>,
-    ) -> Result<(), ()> {
+    ) {
         if self.store.get_parents(u_hash).is_some() {
             trace!(target: "AlephBFT-runway", "{:?} We got parents response but already know the parents.", self.index());
-            return Ok(());
+            return;
         }
         let (u_round, u_control_hash, parent_ids) = match self.store.unit_by_hash(&u_hash) {
             Some(su) => {
@@ -579,13 +550,13 @@ where
             }
             None => {
                 trace!(target: "AlephBFT-runway", "{:?} We got parents but don't even know the unit. Ignoring.", self.index());
-                return Ok(());
+                return;
             }
         };
 
         if parent_ids.len() != parents.len() {
             warn!(target: "AlephBFT-runway", "{:?} In received parent response expected {} parents got {} for unit {:?}.", self.index(), parents.len(), parent_ids.len(), u_hash);
-            return Err(());
+            return;
         }
 
         let mut p_hashes_node_map: NodeMap<Option<H::Hash>> =
@@ -594,18 +565,18 @@ where
             let su = match self.validate_unit(uu) {
                 None => {
                     warn!(target: "AlephBFT-runway", "{:?} In received parent response received a unit that does not pass validation.", self.index());
-                    return Err(());
+                    return;
                 }
                 Some(su) => su,
             };
             let full_unit = su.as_signable();
             if full_unit.round() + 1 != u_round {
                 warn!(target: "AlephBFT-runway", "{:?} In received parent response received a unit with wrong round.", self.index());
-                return Err(());
+                return;
             }
             if full_unit.creator() != parent_ids[i] {
                 warn!(target: "AlephBFT-runway", "{:?} In received parent response received a unit with wrong creator.", self.index());
-                return Err(());
+                return;
             }
             let p_hash = full_unit.hash();
             let ix = full_unit.creator();
@@ -617,14 +588,13 @@ where
 
         if ControlHash::<H>::combine_hashes(&p_hashes_node_map) != u_control_hash {
             warn!(target: "AlephBFT-runway", "{:?} In received parent response the control hash is incorrect {:?}.", self.index(), p_hashes_node_map);
-            return Err(());
+            return;
         }
         let p_hashes: Vec<H::Hash> = p_hashes_node_map.into_iter().flatten().collect();
         self.store.add_parents(u_hash, p_hashes.clone());
         self.request_tracker.parents_resolved(&u_hash);
         trace!(target: "AlephBFT-runway", "{:?} Succesful parents reponse for {:?}.", self.index(), u_hash);
         self.send_consensus_notification(NotificationIn::UnitParents(u_hash, p_hashes));
-        Ok(())
     }
 
     fn send_consensus_notification(&mut self, notification: NotificationIn<H>) {
@@ -633,10 +603,22 @@ where
             .expect("Channel to consensus should be open")
     }
 
-    async fn on_alert_notification(
-        &mut self,
-        notification: ForkingNotification<H, D, MK::Signature>,
-    ) {
+    async fn on_create(&mut self, u: PreUnit<H>) {
+        debug!(target: "AlephBFT-runway", "{:?} On create notification.", self.index());
+        let data = self.data_io.get_data();
+        let full_unit = FullUnit::new(u, data, self.config.session_id);
+        let hash: <H as Hasher>::Hash = full_unit.hash();
+        let signed_unit: Signed<FullUnit<H, D>, MK> = Signed::sign(full_unit, &self.keybox).await;
+        self.store.add_unit(signed_unit.clone(), false);
+
+        let message = UnitMessage::<H, D, MK::Signature>::NewUnit(signed_unit.into());
+        trace!(target: "AlephBFT-runway", "{:?} Sending a unit {:?}.", self.index(), hash);
+        self.unit_messages_for_network
+            .unbounded_send(OutgoingMessage::Raw((message, Recipient::Everyone)))
+            .expect("network's channel should be open")
+    }
+
+    fn on_alert_notification(&mut self, notification: ForkingNotification<H, D, MK::Signature>) {
         use ForkingNotification::*;
         match notification {
             Forker(proof) => {
@@ -647,9 +629,7 @@ where
             }
             Units(units) => {
                 for uu in units {
-                    if self.on_unit_received(uu, true).is_err() {
-                        debug!(target: "AlephBFT-runway", "{:?} on_alert_notification failed to process units.", self.index());
-                    }
+                    self.on_unit_received(uu, true);
                 }
             }
         }
@@ -671,21 +651,6 @@ where
                 self.request_tracker.parents_resolved(&h);
             }
         }
-    }
-
-    async fn on_create(&mut self, u: PreUnit<H>) {
-        debug!(target: "AlephBFT-runway", "{:?} On create notification.", self.index());
-        let data = self.data_io.get_data();
-        let full_unit = FullUnit::new(u, data, self.config.session_id);
-        let hash: <H as Hasher>::Hash = full_unit.hash();
-        let signed_unit: Signed<FullUnit<H, D>, MK> = Signed::sign(full_unit, &self.keybox).await;
-        self.store.add_unit(signed_unit.clone(), false);
-
-        let message = UnitMessage::<H, D, MK::Signature>::NewUnit(signed_unit.into());
-        trace!(target: "AlephBFT-runway", "{:?} Sending a unit {:?}.", self.index(), hash);
-        self.unit_messages_for_network
-            .unbounded_send(OutgoingMessage::Raw((message, Recipient::Everyone)))
-            .expect("network's channel should be open")
     }
 
     fn on_missing_coords(&mut self, mut coords: Vec<UnitCoord>) {
@@ -710,7 +675,8 @@ where
             // without us requesting them).
             let p_hashes = p_hashes.clone();
             trace!(target: "AlephBFT-runway", "{:?} We have the parents for {:?} even though we did not request them.", self.index(), u_hash);
-            notification = Some(NotificationIn::UnitParents(u_hash, p_hashes));
+            notification = NotificationIn::UnitParents(u_hash, p_hashes);
+            self.send_consensus_notification(notification);
         } else {
             let message = UnitMessage::<H, D, MK::Signature>::RequestParents(self.index(), u_hash);
             self.unit_messages_for_network
@@ -720,12 +686,9 @@ where
                 ))
                 .expect("network's channel should be open");
         }
-        if let Some(notification) = notification {
-            self.send_consensus_notification(notification);
-        }
     }
 
-    async fn on_ordered_batch(&mut self, batch: Vec<H::Hash>) {
+    fn on_ordered_batch(&mut self, batch: Vec<H::Hash>) {
         let batch = batch
             .iter()
             .map(|h| {
@@ -803,7 +766,7 @@ where
                 },
 
                 notification = self.notifications_from_alerter.next() => match notification {
-                    Some(notification) => self.on_alert_notification(notification).await,
+                    Some(notification) => self.on_alert_notification(notification),
                     None => {
                         error!(target: "AlephBFT-runway", "{:?} Alert notification stream closed.", index);
                         break;
@@ -819,7 +782,7 @@ where
                 },
 
                 batch = self.ordered_batch_rx.next() => match batch {
-                    Some(batch) => self.on_ordered_batch(batch).await,
+                    Some(batch) => self.on_ordered_batch(batch),
                     None => {
                         error!(target: "AlephBFT-runway", "{:?} Ordered batch stream closed.", index);
                         break;
