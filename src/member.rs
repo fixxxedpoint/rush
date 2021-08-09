@@ -10,7 +10,7 @@ use crate::{
 use codec::{Decode, Encode};
 use futures::{
     channel::{mpsc, oneshot},
-    future::{ready, FusedFuture},
+    future::ready,
     pin_mut,
     stream::iter,
     Future, FutureExt, Stream, StreamExt,
@@ -238,23 +238,18 @@ where
         info!(target: "AlephBFT-member", "{:?} Initializing Runway.", self.index());
 
         let runway_future = runway_future.fuse();
+        let runway_future = into_infinite_stream(runway_future).fuse();
         pin_mut!(runway_future);
 
-        // self.runway_facade.start();
-        // let (runway_exit, exit_stream) = oneshot::channel();
-        // // TODO dodaj metodę ktora zajmuje sie jedynie pchanie do przodu runway
-        // let runway_handle = self.runway.run(exit_stream);
-        // pin_mut!(runway_handle);
-        // let mut runway_handle = into_infinite_stream(runway_handle).fuse();
-
-        // TODO mozliwe rozwiazanie: runway ma metode "check_request" zamiast oddzielnego typu,
-        // runway ma tez async metode proceed ktora zawsze sie konczy, co umozliwia odpytywanie runwaya o requesty
         info!(target: "AlephBFT-member", "{:?} Runway initialized.", index);
 
         loop {
-            // todo!("use new runway-facade here");
             futures::select! {
-                _ = runway_future => {},
+                _ = runway_future.next() => {
+                    error!(target: "AlephBFT-member", "{:?} Runway terminated early.", index);
+                    break;
+                },
+
                 event = self.runway_facade.next_outgoing_message().fuse() => match event {
                     Some((message, recipient)) => {
                         self.on_unit_message_from_units(message, Some(recipient));
@@ -283,6 +278,8 @@ where
                 _ = &mut exit => break,
             }
         }
+        self.runway_facade.stop().await;
+        runway_future.next().await;
         if network_exit.send(()).is_err() {
             debug!(target: "AlephBFT-member", "{:?} network already stopped.", index);
         }
@@ -368,7 +365,7 @@ where
             .expect("Channel to network should be open")
     }
 
-    async fn schedule_parents_request(&mut self, u_hash: H::Hash, curr_time: time::Instant) {
+    fn schedule_parents_request(&mut self, u_hash: H::Hash, curr_time: time::Instant) {
         if self.runway_facade.missing_parents(&u_hash) {
             let message = UnitMessage::<H, D, MK::Signature>::RequestParents(self.index(), u_hash);
             let peer_id = self.random_peer();
@@ -384,7 +381,7 @@ where
         }
     }
 
-    async fn schedule_coord_request(&mut self, coord: UnitCoord, curr_time: time::Instant) {
+    fn schedule_coord_request(&mut self, coord: UnitCoord, curr_time: time::Instant) {
         trace!(target: "AlephBFT-member", "{:?} Starting request for {:?}", self.index(), coord);
         // If we already received or never asked for such coord then there is no need to request it.
         // It will be sent to consensus soon (or have already been sent).

@@ -33,7 +33,6 @@ where
     D: Data,
     MK: MultiKeychain,
 {
-    // runway: Runway<'a, H, D, MK, DP, SH>,
     runway_exit: oneshot::Sender<()>,
     outgoing_messages: Receiver<OutgoingMessage<(UnitMessage<H, D, MK::Signature>, Recipient)>>,
     incoming_messages: Sender<UnitMessage<H, D, MK::Signature>>,
@@ -60,39 +59,6 @@ where
             missing_parents: HashMap::new(),
         }
     }
-
-    // pub(crate) fn new(
-    //     config: Config,
-    //     keychain: &'a MK,
-    //     data_io: DP,
-    //     spawn_handle: SH,
-    //     alert_messages_for_network: Sender<(
-    //         AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
-    //         Recipient,
-    //     )>,
-    //     alert_messages_from_network: Receiver<
-    //         AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
-    //     >,
-    // ) -> RunwayFacade<'a, H, D, MK, DP, SH> {
-    //     let (unit_messages_for_units, unit_messages_from_network) = mpsc::unbounded();
-    //     let (unit_messages_for_network, unit_messages_from_units) = mpsc::unbounded();
-    //     let runway = InitializedRunway::new(
-    //         config,
-    //         keychain,
-    //         data_io,
-    //         spawn_handle,
-    //         alert_messages_for_network,
-    //         alert_messages_from_network,
-    //         unit_messages_from_network,
-    //         unit_messages_for_network,
-    //     );
-    //     RunwayFacade {
-    //         runway,
-    //         outgoing_messages: unit_messages_from_units,
-    //         incoming_messages: unit_messages_for_units,
-    //         store: runway.store.clone(),
-    //     }
-    // }
 
     pub(crate) fn enqueue_message(&mut self, message: UnitMessage<H, D, MK::Signature>) {
         self.incoming_messages
@@ -156,8 +122,6 @@ where
         if self.runway_exit.send(()).is_err() {
             warn!(target: "AlephBFT-runway", "runway already stopped");
         }
-        todo!();
-        // self.runway_handle.await;
     }
 }
 
@@ -332,8 +296,6 @@ where
             }
             ResponseCoord(u) => {
                 trace!(target: "AlephBFT-runway", "{:?} Fetch response received {:?}.", self.index(), &u);
-                // todo!("request again if invalid");
-                let coord = u.as_signable().coord();
                 self.on_unit_received(u, false)
             }
             RequestParents(peer_id, u_hash) => {
@@ -504,7 +466,6 @@ where
     fn on_request_parents(&mut self, peer_id: NodeIndex, u_hash: H::Hash) {
         debug!(target: "AlephBFT-runway", "{:?} Received parents request for hash {:?} from {:?}.", self.index(), u_hash, peer_id);
 
-        let mut message = None;
         if let Some(p_hashes) = self.store.get_parents(u_hash) {
             let p_hashes = p_hashes.clone();
             trace!(target: "AlephBFT-runway", "{:?} Answering parents request for hash {:?} from {:?}.", self.index(), u_hash, peer_id);
@@ -667,15 +628,14 @@ where
         }
     }
 
-    async fn on_wrong_control_hash(&mut self, u_hash: H::Hash) {
+    fn on_wrong_control_hash(&mut self, u_hash: H::Hash) {
         trace!(target: "AlephBFT-runway", "{:?} Dealing with wrong control hash notification {:?}.", self.index(), u_hash);
-        let mut notification = None;
         if let Some(p_hashes) = self.store.get_parents(u_hash) {
             // We have the parents by some strange reason (someone sent us parents
             // without us requesting them).
             let p_hashes = p_hashes.clone();
             trace!(target: "AlephBFT-runway", "{:?} We have the parents for {:?} even though we did not request them.", self.index(), u_hash);
-            notification = NotificationIn::UnitParents(u_hash, p_hashes);
+            let notification = NotificationIn::UnitParents(u_hash, p_hashes);
             self.send_consensus_notification(notification);
         } else {
             let message = UnitMessage::<H, D, MK::Signature>::RequestParents(self.index(), u_hash);
@@ -705,7 +665,7 @@ where
         }
     }
 
-    async fn move_units_to_consensus(&mut self) {
+    fn move_units_to_consensus(&mut self) {
         let units_to_move = self
             .store
             .yield_buffer_units()
