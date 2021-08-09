@@ -13,11 +13,11 @@ use crate::{
         ControlHash, FullUnit, PreUnit, SignedUnit, UncheckedSignedUnit, UnitCoord, UnitStore,
     },
     Config, Data, DataIO, Hasher, Index, MultiKeychain, NodeCount, NodeIndex, OrderedBatch,
-    Receiver, Sender, Signed, SpawnHandle, TaskHandle,
+    Receiver, Sender, Signed, SpawnHandle,
 };
 use futures::{
     channel::{mpsc, oneshot},
-    StreamExt,
+    Future, StreamExt,
 };
 use log::{debug, error, info, trace, warn};
 use tokio::sync::Barrier;
@@ -34,7 +34,6 @@ where
     MK: MultiKeychain,
 {
     // runway: Runway<'a, H, D, MK, DP, SH>,
-    runway_handle: TaskHandle,
     runway_exit: oneshot::Sender<()>,
     outgoing_messages: Receiver<OutgoingMessage<(UnitMessage<H, D, MK::Signature>, Recipient)>>,
     incoming_messages: Sender<UnitMessage<H, D, MK::Signature>>,
@@ -49,13 +48,11 @@ where
     MK: MultiKeychain,
 {
     fn new(
-        runway_handle: TaskHandle,
         runway_exit: oneshot::Sender<()>,
         outgoing_messages: Receiver<OutgoingMessage<(UnitMessage<H, D, MK::Signature>, Recipient)>>,
         incoming_messages: Sender<UnitMessage<H, D, MK::Signature>>,
     ) -> Self {
         RunwayFacade {
-            runway_handle,
             runway_exit,
             outgoing_messages,
             incoming_messages,
@@ -159,7 +156,8 @@ where
         if self.runway_exit.send(()).is_err() {
             warn!(target: "AlephBFT-runway", "runway already stopped");
         }
-        self.runway_handle.await;
+        todo!();
+        // self.runway_handle.await;
     }
 }
 
@@ -264,25 +262,19 @@ where
     H: Hasher,
     D: Data,
     MK: MultiKeychain,
-    DP: DataIO<D> + Send + 'static,
-    SH: SpawnHandle + Send + 'static,
+    DP: DataIO<D>,
+    SH: SpawnHandle,
 {
-    pub(crate) fn start(self) -> RunwayFacade<H, D, MK> {
+    pub(crate) fn start(self) -> (RunwayFacade<H, D, MK>, impl Future<Output = ()>) {
         let (runway_exit, exit_stream) = oneshot::channel();
         let runway = self.runway;
-        let spawn_handle = runway.spawn_handle.clone();
         let alerter = self.alerter;
         let consensus = self.consensus;
-        let runway_handle = spawn_handle.spawn_essential("runway", async move {
-            runway.run(exit_stream, alerter, consensus).await
-        });
         let outgoing_messages = self.outgoing_messages;
         let incoming_messages = self.incoming_messages;
-        RunwayFacade::new(
-            runway_handle,
-            runway_exit,
-            outgoing_messages,
-            incoming_messages,
+        (
+            RunwayFacade::new(runway_exit, outgoing_messages, incoming_messages),
+            runway.run(exit_stream, alerter, consensus),
         )
     }
 
@@ -761,7 +753,7 @@ where
     }
 }
 
-impl<H, D, MK, DP, SH> Runway<'static, H, D, MK, DP, SH>
+impl<'a, H, D, MK, DP, SH> Runway<'a, H, D, MK, DP, SH>
 where
     H: Hasher,
     D: Data,

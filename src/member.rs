@@ -10,7 +10,8 @@ use crate::{
 use codec::{Decode, Encode};
 use futures::{
     channel::{mpsc, oneshot},
-    future::ready,
+    future::{ready, FusedFuture},
+    pin_mut,
     stream::iter,
     Future, FutureExt, Stream, StreamExt,
 };
@@ -181,7 +182,6 @@ where
 {
     member: Member<'a, H, D, DP, MK, SH>,
     runway_facade: RunwayFacade<H, D, MK>,
-    // runway_exit: oneshot::Sender<()>,
     unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
     unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
 }
@@ -209,7 +209,7 @@ where
     }
 }
 
-impl<H, D, DP, MK, SH> InitializedMember<'static, H, D, DP, MK, SH>
+impl<'a, H, D, DP, MK, SH> InitializedMember<'a, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
@@ -218,7 +218,8 @@ where
     SH: SpawnHandle,
 {
     async fn run<N: Network<H, D, MK::Signature, MK::PartialMultisignature> + 'static>(
-        &mut self,
+        mut self,
+        runway_future: impl Future<Output = ()>,
         mut network: NetworkHub<H, D, MK::Signature, MK::PartialMultisignature, N>,
         mut exit: oneshot::Receiver<()>,
     ) {
@@ -236,6 +237,9 @@ where
 
         info!(target: "AlephBFT-member", "{:?} Initializing Runway.", self.index());
 
+        let runway_future = runway_future.fuse();
+        pin_mut!(runway_future);
+
         // self.runway_facade.start();
         // let (runway_exit, exit_stream) = oneshot::channel();
         // // TODO dodaj metodę ktora zajmuje sie jedynie pchanie do przodu runway
@@ -250,6 +254,7 @@ where
         loop {
             // todo!("use new runway-facade here");
             futures::select! {
+                _ = runway_future => {},
                 event = self.runway_facade.next_outgoing_message().fuse() => match event {
                     Some((message, recipient)) => {
                         self.on_unit_message_from_units(message, Some(recipient));
@@ -492,21 +497,24 @@ where
             alert_messages_for_network,
             alert_messages_from_network,
         );
-        let runway = runway.start();
+        let (runway_facade, runway_future) = runway.start();
+        let runway_future = runway_future.fuse();
         // todo!(
         //     "start runway (which should return a RunwayFacade) before passing to InitializedMember"
         // );
 
-        let mut initialized_member = InitializedMember::new(
+        let initialized_member = InitializedMember::new(
             self,
-            runway,
+            runway_facade,
             unit_messages_for_network,
             unit_messages_from_network,
         );
 
         info!(target: "AlephBFT-member", "{:?} Running member.", index);
 
-        initialized_member.run(network_hub, exit).await;
+        initialized_member
+            .run(runway_future, network_hub, exit)
+            .await;
 
         info!(target: "AlephBFT-member", "{:?} Run ended.", index);
     }
