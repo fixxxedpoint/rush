@@ -81,7 +81,7 @@ async fn catches_wrong_control_hash() {
 
     let consensus_handle = spawner.spawn_essential(
         "consensus",
-        run(conf, rx_in, tx_out, batch_tx, spawner.clone(), exit_rx),
+        Consensus::new(conf, spawner.clone(), rx_in, tx_out, batch_tx).run(exit_rx),
     );
     let control_hash = ControlHash::new(&(vec![None; n_nodes]).into());
     let bad_pu = PreUnit::<Hasher64>::new(1.into(), 0, control_hash);

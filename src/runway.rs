@@ -161,7 +161,7 @@ where
     }
 }
 
-pub(crate) struct InitializedRunway<'a, H, D, MK, DP, SH>
+pub(crate) struct InitializedRunway<H, D, MK, DP, SH>
 where
     H: Hasher,
     D: Data,
@@ -169,14 +169,14 @@ where
     DP: DataIO<D>,
     SH: SpawnHandle,
 {
-    runway: Runway<'a, H, D, MK, DP, SH>,
-    alerter: Alerter<'a, H, D, MK>,
+    runway: Runway<H, D, MK, DP, SH>,
+    alerter: Alerter<H, D, MK>,
     consensus: Consensus<H, SH>,
     outgoing_messages: Receiver<OutgoingMessage<(UnitMessage<H, D, MK::Signature>, Recipient)>>,
     incoming_messages: Sender<UnitMessage<H, D, MK::Signature>>,
 }
 
-impl<'a, H, D, MK, DP, SH> InitializedRunway<'a, H, D, MK, DP, SH>
+impl<H, D, MK, DP, SH> InitializedRunway<H, D, MK, DP, SH>
 where
     H: Hasher,
     D: Data,
@@ -186,7 +186,7 @@ where
 {
     pub(crate) fn new(
         config: Config,
-        keychain: &'a MK,
+        keychain: MK,
         data_io: DP,
         spawn_handle: SH,
         alert_messages_for_network: Sender<(
@@ -211,7 +211,7 @@ where
             n_members: config.n_members,
         };
         let alerter = Alerter::new(
-            keychain,
+            keychain.clone(),
             alert_messages_for_network,
             alert_messages_from_network,
             alert_notifications_for_units,
@@ -235,7 +235,7 @@ where
         let runway = Runway {
             config,
             store,
-            keybox: keychain,
+            keybox: keychain.clone(),
             alerts_for_alerter,
             notifications_from_alerter,
             tx_consensus,
@@ -257,7 +257,7 @@ where
     }
 }
 
-impl<H, D, MK, DP, SH> InitializedRunway<'static, H, D, MK, DP, SH>
+impl<H, D, MK, DP, SH> InitializedRunway<H, D, MK, DP, SH>
 where
     H: Hasher,
     D: Data,
@@ -274,7 +274,7 @@ where
         let incoming_messages = self.incoming_messages;
         (
             RunwayFacade::new(runway_exit, outgoing_messages, incoming_messages),
-            runway.run(exit_stream, alerter, consensus),
+            async move { runway.run(exit_stream, alerter, consensus).await },
         )
     }
 
@@ -284,7 +284,7 @@ where
     // }
 }
 
-pub(crate) struct Runway<'a, H, D, MK, DP, SH>
+pub(crate) struct Runway<H, D, MK, DP, SH>
 where
     H: Hasher,
     D: Data,
@@ -294,7 +294,7 @@ where
 {
     config: Config,
     store: UnitStore<H, D, MK>,
-    keybox: &'a MK,
+    keybox: MK,
     alerts_for_alerter: Sender<Alert<H, D, MK::Signature>>,
     notifications_from_alerter: Receiver<ForkingNotification<H, D, MK::Signature>>,
     unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
@@ -308,7 +308,7 @@ where
     request_tracker: RequestTracker<H>,
 }
 
-impl<'a, H, D, MK, DP, SH> Runway<'a, H, D, MK, DP, SH>
+impl<H, D, MK, DP, SH> Runway<H, D, MK, DP, SH>
 where
     H: Hasher,
     D: Data,
@@ -390,7 +390,7 @@ where
         &self,
         uu: UncheckedSignedUnit<H, D, MK::Signature>,
     ) -> Option<SignedUnit<H, D, MK>> {
-        let su = match uu.check(self.keybox) {
+        let su = match uu.check(&self.keybox) {
             Ok(su) => su,
             Err(uu) => {
                 warn!(target: "AlephBFT-runway", "{:?} Wrong signature received {:?}.", self.index(), &uu);
@@ -678,7 +678,7 @@ where
         let data = self.data_io.get_data();
         let full_unit = FullUnit::new(u, data, self.config.session_id);
         let hash: <H as Hasher>::Hash = full_unit.hash();
-        let signed_unit: Signed<FullUnit<H, D>, MK> = Signed::sign(full_unit, self.keybox).await;
+        let signed_unit: Signed<FullUnit<H, D>, MK> = Signed::sign(full_unit, &self.keybox).await;
         self.store.add_unit(signed_unit.clone(), false);
 
         let message = UnitMessage::<H, D, MK::Signature>::NewUnit(signed_unit.into());
@@ -753,7 +753,7 @@ where
     }
 }
 
-impl<'a, H, D, MK, DP, SH> Runway<'a, H, D, MK, DP, SH>
+impl<H, D, MK, DP, SH> Runway<H, D, MK, DP, SH>
 where
     H: Hasher,
     D: Data,
@@ -764,7 +764,7 @@ where
     pub(crate) async fn run(
         mut self,
         mut exit: oneshot::Receiver<()>,
-        alerter: Alerter<'static, H, D, MK>,
+        alerter: Alerter<H, D, MK>,
         consensus: Consensus<H, SH>,
     ) {
         info!(target: "AlephBFT-runway", "{:?} Runway starting.", self.index());

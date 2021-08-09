@@ -136,9 +136,9 @@ pub(crate) enum ForkingNotification<H: Hasher, D: Data, S: Signature> {
 /// https://cardinal-cryptography.github.io/AlephBFT/how_alephbft_does_it.html Section 2.5 and
 /// https://cardinal-cryptography.github.io/AlephBFT/reliable_broadcast.html and to the Aleph
 /// paper https://arxiv.org/abs/1908.05156 Appendix A1 for a discussion.
-pub(crate) struct Alerter<'a, H: Hasher, D: Data, MK: MultiKeychain> {
+pub(crate) struct Alerter<H: Hasher, D: Data, MK: MultiKeychain> {
     session_id: SessionId,
-    keychain: &'a MK,
+    keychain: MK,
     messages_for_network: Sender<(
         AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
         Recipient,
@@ -150,7 +150,7 @@ pub(crate) struct Alerter<'a, H: Hasher, D: Data, MK: MultiKeychain> {
     known_forkers: HashMap<NodeIndex, ForkProof<H, D, MK::Signature>>,
     known_alerts: HashMap<H::Hash, Signed<Alert<H, D, MK::Signature>, MK>>,
     known_rmcs: HashMap<(NodeIndex, NodeIndex), H::Hash>,
-    rmc: ReliableMulticast<'a, H::Hash, MK>,
+    rmc: ReliableMulticast<H::Hash, MK>,
     messages_from_rmc: Receiver<rmc::Message<H::Hash, MK::Signature, MK::PartialMultisignature>>,
     messages_for_rmc: Sender<rmc::Message<H::Hash, MK::Signature, MK::PartialMultisignature>>,
 }
@@ -161,9 +161,9 @@ pub(crate) struct AlertConfig {
     pub session_id: SessionId,
 }
 
-impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
+impl<H: Hasher, D: Data, MK: MultiKeychain> Alerter<H, D, MK> {
     pub(crate) fn new(
-        keychain: &'a MK,
+        keychain: MK,
         messages_for_network: Sender<(
             AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
             Recipient,
@@ -179,7 +179,7 @@ impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
         let (messages_for_us, messages_from_rmc) = mpsc::unbounded();
         Self {
             session_id: config.session_id,
-            keychain,
+            keychain: keychain.clone(),
             messages_for_network,
             messages_from_network,
             notifications_for_units,
@@ -234,7 +234,7 @@ impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
         }
         let mut rounds = HashSet::new();
         for u in units {
-            let u = match u.clone().check(self.keychain) {
+            let u = match u.clone().check(&self.keychain) {
                 Ok(u) => u,
                 Err(_) => {
                     warn!(target: "AlephBFT-alerter", "{:?} One of the units is incorrectly signed.", self.index());
@@ -258,8 +258,8 @@ impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
     fn who_is_forking(&self, proof: &ForkProof<H, D, MK::Signature>) -> Option<NodeIndex> {
         let (u1, u2) = proof;
         let (u1, u2) = {
-            let u1 = u1.clone().check(self.keychain);
-            let u2 = u2.clone().check(self.keychain);
+            let u1 = u1.clone().check(&self.keychain);
+            let u2 = u2.clone().check(&self.keychain);
             match (u1, u2) {
                 (Ok(u1), Ok(u2)) => (u1, u2),
                 _ => {
@@ -305,7 +305,7 @@ impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
     async fn on_own_alert(&mut self, alert: Alert<H, D, MK::Signature>) {
         let forker = alert.forker();
         self.known_forkers.insert(forker, alert.proof.clone());
-        let alert = Signed::sign(alert, self.keychain).await;
+        let alert = Signed::sign(alert, &self.keychain).await;
         self.messages_for_network
             .unbounded_send((
                 AlertMessage::ForkAlert(alert.clone().into()),
@@ -319,7 +319,7 @@ impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
         &mut self,
         alert: UncheckedSigned<Alert<H, D, MK::Signature>, MK::Signature>,
     ) {
-        let alert = match alert.check(self.keychain) {
+        let alert = match alert.check(&self.keychain) {
             Ok(alert) => alert,
             Err(e) => {
                 warn!(target: "AlephBFT-alerter","{:?} We have received an incorrectly signed alert: {:?}.", self.index(), e);
@@ -469,7 +469,7 @@ pub(crate) async fn run<H: Hasher, D: Data, MK: MultiKeychain>(
     exit: oneshot::Receiver<()>,
 ) {
     Alerter::new(
-        &keychain,
+        keychain,
         messages_for_network,
         messages_from_network,
         notifications_for_units,

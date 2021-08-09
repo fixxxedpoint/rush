@@ -456,7 +456,7 @@ where
     }
 }
 
-impl<H, D, DP, MK, SH> Member<'static, H, D, DP, MK, SH>
+impl<'a, H, D, DP, MK, SH> Member<'a, H, D, DP, MK, SH>
 where
     H: Hasher,
     D: Data,
@@ -491,14 +491,13 @@ where
 
         let runway = InitializedRunway::new(
             self.config.clone(),
-            self.keybox,
+            self.keybox.clone(),
             self.data_io.take().unwrap(),
             self.spawn_handle.clone(),
             alert_messages_for_network,
             alert_messages_from_network,
         );
         let (runway_facade, runway_future) = runway.start();
-        let runway_future = runway_future.fuse();
         // todo!(
         //     "start runway (which should return a RunwayFacade) before passing to InitializedMember"
         // );
