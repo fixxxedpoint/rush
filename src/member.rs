@@ -15,6 +15,7 @@ use futures::{
     stream::iter,
     Future, FutureExt, Stream, StreamExt,
 };
+use futures_timer::Delay;
 use log::{debug, error, info, trace, warn};
 use rand::Rng;
 use std::{cmp::Ordering, collections::BinaryHeap, fmt::Debug, iter::repeat, time};
@@ -241,6 +242,9 @@ where
         let runway_future = into_infinite_stream(runway_future).fuse();
         pin_mut!(runway_future);
 
+        let ticker_delay = self.member.config.delay_config.tick_interval;
+        let mut ticker = Delay::new(ticker_delay).fuse();
+
         info!(target: "AlephBFT-member", "{:?} Runway initialized.", index);
 
         loop {
@@ -275,6 +279,11 @@ where
                     break;
                 },
 
+                _ = &mut ticker => {
+                    self.trigger_tasks();
+                    ticker = Delay::new(ticker_delay).fuse();
+                },
+
                 _ = &mut exit => break,
             }
         }
@@ -302,6 +311,7 @@ where
         let curr_time = time::Instant::now();
         let task = ScheduledTask::new(Task::UnitMulticast(index, 0), curr_time);
         self.member.requests.push(task);
+        self.trigger_tasks();
     }
 
     fn on_request_coord(&mut self, coord: UnitCoord) {
@@ -414,7 +424,6 @@ where
             .clone();
         let hash = signed_unit.as_signable().hash();
         let message = UnitMessage::<H, D, MK::Signature>::NewUnit(signed_unit.into());
-        // TODO consider not using hash() here
         trace!(target: "AlephBFT-member", "{:?} Sending a unit {:?} over network {:?}th time.", self.index(), hash, multicast_number);
         self.broadcast_units(message);
         let delay = (self.member.config.delay_config.unit_broadcast_delay)(multicast_number);
@@ -432,6 +441,7 @@ where
         match message {
             UnitMessage::NewUnit(u) => self.on_create(u),
             UnitMessage::RequestCoord(_, coord) => self.on_request_coord(coord),
+            UnitMessage::RequestParents(_, hash) => self.on_request_parents(hash),
             UnitMessage::ResponseCoord(_) => match recipient {
                 Some(Recipient::Node(peer_id)) => {
                     self.send_unit_message(message, peer_id);
@@ -440,7 +450,6 @@ where
                     warn!(target: "AlephBFT-member", "{:?} Missing Recipient for a ResponseCoord message.", self.index());
                 }
             },
-            UnitMessage::RequestParents(_, hash) => self.on_request_parents(hash),
             UnitMessage::ResponseParents(_, _) => match recipient {
                 Some(Recipient::Node(peer_id)) => {
                     self.send_unit_message(message, peer_id);
@@ -495,9 +504,6 @@ where
             alert_messages_from_network,
         );
         let (runway_facade, runway_future) = runway.start();
-        // todo!(
-        //     "start runway (which should return a RunwayFacade) before passing to InitializedMember"
-        // );
 
         let initialized_member = InitializedMember::new(
             self,
