@@ -171,7 +171,6 @@ where
         let (alerts_for_alerter, alerts_from_units) = mpsc::unbounded();
         let alert_config = AlertConfig {
             session_id: config.session_id,
-            max_units_per_alert: config.max_units_per_alert,
             n_members: config.n_members,
         };
         let alerter = Alerter::new(
@@ -358,9 +357,9 @@ where
 
     fn add_unit_to_store_unless_fork(&mut self, su: SignedUnit<H, D, MK>) {
         let full_unit = su.as_signable();
-        trace!(target: "AlephBFT-runway", "{:?} Adding member unit to store {:?}", self.index(), full_unit);
+        trace!(target: "AlephBFT-member", "{:?} Adding member unit to store {:?}", self.index(), full_unit);
         if self.store.is_forker(full_unit.creator()) {
-            trace!(target: "AlephBFT-runway", "{:?} Ignoring forker's unit {:?}", self.index(), full_unit);
+            trace!(target: "AlephBFT-member", "{:?} Ignoring forker's unit {:?}", self.index(), full_unit);
             return;
         }
         if let Some(sv) = self.store.is_new_fork(full_unit) {
@@ -374,16 +373,10 @@ where
             // There is no point in keeping this unit in any kind of buffer.
             return;
         }
-        let u_round = full_unit.round();
-        let round_in_progress = self.store.get_round_in_progress();
-        let rounds_margin = self.config.rounds_margin;
-        if u_round <= round_in_progress + rounds_margin {
-            self.request_tracker
-                .coordinates_resolved(&su.as_signable().coord());
-            self.store.add_unit(su, false);
-        } else {
-            warn!(target: "AlephBFT-runway", "{:?} Unit {:?} ignored because of too high round {} when round in progress is {}.", self.index(), full_unit, u_round, round_in_progress);
-        }
+
+        self.request_tracker
+            .coordinates_resolved(&su.as_signable().coord());
+        self.store.add_unit(su, false);
     }
 
     fn validate_unit_parents(&self, su: &SignedUnit<H, D, MK>) -> bool {
@@ -418,14 +411,7 @@ where
     }
 
     fn on_new_forker_detected(&mut self, forker: NodeIndex, proof: ForkProof<H, D, MK::Signature>) {
-        let max_units_alert = self.config.max_units_per_alert;
-        let mut alerted_units = self.store.mark_forker(forker);
-        if alerted_units.len() > max_units_alert {
-            // The ordering is increasing w.r.t. rounds.
-            alerted_units.reverse();
-            alerted_units.truncate(max_units_alert);
-            alerted_units.reverse();
-        }
+        let alerted_units = self.store.mark_forker(forker);
         let alert = self.form_alert(proof, alerted_units);
         self.alerts_for_alerter
             .unbounded_send(alert)
@@ -598,7 +584,7 @@ where
 
     async fn on_consensus_notification(&mut self, notification: NotificationOut<H>) {
         match notification {
-            NotificationOut::CreatedPreUnit(pu) => {
+            NotificationOut::CreatedPreUnit(pu, _) => {
                 self.on_create(pu).await;
             }
             NotificationOut::MissingUnits(coords) => {
@@ -638,11 +624,20 @@ where
             let notification = NotificationIn::UnitParents(u_hash, p_hashes);
             self.send_consensus_notification(notification);
         } else {
+            let peer_id = self
+                .store
+                .unit_by_hash(&u_hash)
+                .map(|u| u.as_signable().creator());
+            let recipient = if let Some(peer_id) = peer_id {
+                Recipient::Node(peer_id)
+            } else {
+                Recipient::Everyone
+            };
             let message = UnitMessage::<H, D, MK::Signature>::RequestParents(self.index(), u_hash);
             self.unit_messages_for_network
                 .unbounded_send(OutgoingMessage::WithTrackedRequest(
                     self.request_tracker.new_missing_parents_request(&u_hash),
-                    (message, Recipient::Everyone),
+                    (message, recipient),
                 ))
                 .expect("network's channel should be open");
         }

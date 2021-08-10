@@ -59,10 +59,10 @@ please refer to the [detailed version][reference-link].
 - Import AlephBFT in your crate
   ```toml
   [dependencies]
-  aleph-bft = "0.3.1"
+  aleph-bft = "^0.5"
   ```
 - AlephBFT requires user to provide it with an implementation of the following traits:
-  - The [DataIO][dataio-link] trait is an abstraction for a component that provides data items and allows to input ordered data items. `DataIO` is parametrized with a `Data` generic type representing the type of items we would like to order. 
+  - The [DataIO][dataio-link] trait is an abstraction for a component that provides data items and allows to input ordered data items. `DataIO` is parametrized with a `Data` generic type representing the type of items we would like to order.
     ```rust
     pub trait DataIO<Data> {
         type Error: Debug;
@@ -82,9 +82,7 @@ please refer to the [detailed version][reference-link].
   - The [Network][network-link] trait defines the functionality we expect from the network layer:
     ```rust
     pub trait Network<H: Hasher, D: Data, S: Encode + Decode>: Send {
-        type Error: Debug;
-        fn send(&self, data: NetworkData<H, D, S>, node: NodeIndex) -> Result<(), Self::Error>;
-        fn broadcast(&self, data: NetworkData<H, D, S>) -> Result<(), Self::Error>;
+        fn send(&self, data: NetworkData<H, D, S>, recipient: Recipient);
         async fn next_event(&mut self) -> Option<NetworkData<H, D, S>>;
     }
     ```
@@ -122,6 +120,49 @@ where `4` in the above is the number of committee members and can be replaced by
 There are many unit tests and several integration tests that may be run by standard command
 `cargo test --lib` or `cargo test --lib --skip medium` if you want to run just small tests.
 Alternatively, you may run the `run_local_pipeline.sh` script.
+
+### Fuzzing
+
+There are fuzzing tests that try to crash the whole application by creating arbitrary data for the network layer
+and feeding it into the `member` implementation. To run those tests you need to install `afl` and `cargo-fuzz`.
+`cargo-fuzz` requires you to use a nightly Rust toolchain. `afl` differs from `cargo-fuzz` in that it requires
+so called corpus data to operate, i.e. some non-empty data set that do not crash the application.
+Both tools are using LLVM's instrumentation capabilities in order to guide the fuzzing process basing on code-coverage statistics.
+
+```sh
+cargo install cargo-fuzz
+cargo install afl
+```
+
+#### cargo-fuzz/libfuzzer
+
+```sh
+cd fuzz
+cargo fuzz run --features="libfuzz" fuzz_target
+```
+
+#### afl
+
+You will need to generate some `seed` data first in order to run it.
+
+```sh
+cd fuzz
+# create some random input containing network data from a locally executed test
+mkdir afl_in
+cargo build --bin gen_fuzz
+./target/debug/gen_fuzz >./afl_in/seed
+
+cargo afl build --features="afl-fuzz" --bin fuzz_target_afl
+cargo afl fuzz -i afl_in -o afl_out target/debug/fuzz_target_afl
+```
+
+The `gen_fuzz` bin is able to both generate and verify data for the afl tool.
+
+```sh
+cd fuzz
+cargo build --bin gen_fuzz
+./target/debug/gen_fuzz | ./target/debug/gen_fuzz --check-fuzz
+```
 
 ### Code Coverage
 

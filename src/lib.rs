@@ -8,9 +8,9 @@ use std::{fmt::Debug, hash::Hash as StdHash, pin::Pin};
 
 use crate::nodes::NodeMap;
 
-pub use config::{default_config, Config, DelayConfig};
+pub use config::{default_config, exponential_slowdown, Config, DelayConfig};
 pub use member::Member;
-pub use network::{Network, NetworkData};
+pub use network::{Network, NetworkData, Recipient};
 pub use nodes::{NodeCount, NodeIndex};
 
 mod alerts;
@@ -26,7 +26,8 @@ pub use signed::*;
 mod config;
 pub mod rmc;
 mod terminal;
-mod testing;
+#[cfg(test)]
+pub mod testing;
 mod units;
 
 /// The number of a session for which the consensus is run.

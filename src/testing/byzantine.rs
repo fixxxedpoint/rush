@@ -13,8 +13,8 @@ use crate::{
         KeyBox, Network, NetworkData, Spawner,
     },
     units::{ControlHash, FullUnit, PreUnit, SignedUnit, UnitCoord},
-    Hasher, Index, Network as NetworkT, NetworkData as NetworkDataT, NodeCount, NodeIndex, Round,
-    SessionId, SpawnHandle,
+    Hasher, Network as NetworkT, NetworkData as NetworkDataT, NodeCount, NodeIndex, Recipient,
+    Round, SessionId, SpawnHandle,
 };
 
 use crate::member::UnitMessage::NewUnit;
@@ -25,7 +25,6 @@ struct MaliciousMember<'a> {
     threshold: NodeCount,
     session_id: SessionId,
     forking_round: Round,
-    round_in_progress: Round,
     keybox: &'a KeyBox,
     network: Network,
     unit_store: HashMap<UnitCoord, SignedUnit<Hasher64, Data, KeyBox>>,
@@ -47,7 +46,6 @@ impl<'a> MaliciousMember<'a> {
             threshold,
             session_id,
             forking_round,
-            round_in_progress: 0,
             keybox,
             network,
             unit_store: HashMap::new(),
@@ -87,7 +85,7 @@ impl<'a> MaliciousMember<'a> {
 
     fn send_legit_unit(&mut self, su: SignedUnit<Hasher64, Data, KeyBox>) {
         let message = Self::unit_to_data(su);
-        let _ = self.network.broadcast(message);
+        self.network.send(message, Recipient::Everyone);
     }
 
     fn send_two_variants(
@@ -102,17 +100,18 @@ impl<'a> MaliciousMember<'a> {
         for ix in 0..self.n_members.0 {
             let node_ix = NodeIndex(ix);
             let _ = if ix % 2 == 0 {
-                self.network.send(message0.clone(), node_ix)
+                self.network
+                    .send(message0.clone(), Recipient::Node(node_ix))
             } else {
-                self.network.send(message1.clone(), node_ix)
+                self.network
+                    .send(message1.clone(), Recipient::Node(node_ix))
             };
         }
     }
 
-    async fn create_if_possible(&mut self) {
-        if let Some(parents) = self.pick_parents(self.round_in_progress) {
-            debug!(target: "malicious-member", "Creating a legit unit for round {}.", self.round_in_progress);
-            let round = self.round_in_progress;
+    async fn create_if_possible(&mut self, round: Round) -> bool {
+        if let Some(parents) = self.pick_parents(round) {
+            debug!(target: "malicious-member", "Creating a legit unit for round {}.", round);
             let control_hash = ControlHash::<Hasher64>::new(&parents);
             let new_preunit = PreUnit::<Hasher64>::new(self.node_ix, round, control_hash);
             let coord = UnitCoord::new(round, self.node_ix);
@@ -124,7 +123,7 @@ impl<'a> MaliciousMember<'a> {
                 self.send_legit_unit(signed_unit);
             } else {
                 // FORKING HAPPENS HERE!
-                debug!(target: "malicious-member", "Creating forks for round {}.", self.round_in_progress);
+                debug!(target: "malicious-member", "Creating forks for round {}.", round);
                 let mut variants = Vec::new();
                 for var in 0u32..2u32 {
                     let data = Data::new(coord, var);
@@ -134,8 +133,9 @@ impl<'a> MaliciousMember<'a> {
                 }
                 self.send_two_variants(variants[0].clone(), variants[1].clone());
             }
-            self.round_in_progress += 1;
+            return true;
         }
+        false
     }
 
     fn on_unit_received(&mut self, su: SignedUnit<Hasher64, Data, KeyBox>) {
@@ -161,8 +161,11 @@ impl<'a> MaliciousMember<'a> {
     }
 
     pub async fn run_session(mut self, mut exit: oneshot::Receiver<()>) {
-        self.create_if_possible().await;
+        let mut round: Round = 0;
         loop {
+            if self.create_if_possible(round).await {
+                round += 1;
+            }
             tokio::select! {
                 event = self.network.next_event() => match event {
                     Some(data) => {
@@ -175,7 +178,6 @@ impl<'a> MaliciousMember<'a> {
                 },
                 _ = &mut exit => break,
             }
-            self.create_if_possible().await;
         }
     }
 }
@@ -213,17 +215,16 @@ async fn honest_members_agree_on_batches_byzantine(
 ) {
     init_log();
     let spawner = Spawner::new();
-    let mut exits = vec![];
     let mut batch_rxs = Vec::new();
-    let (net_hub, mut networks) = configure_network(n_members, network_reliability);
+    let mut exits = Vec::new();
+    let (mut net_hub, networks) = configure_network(n_members, network_reliability);
 
     let alert_hook = AlertHook::new();
     net_hub.add_hook(alert_hook.clone());
 
     spawner.spawn("network-hub", net_hub);
 
-    for network in networks.iter_mut() {
-        let network = network.take().unwrap();
+    for network in networks {
         let ix = network.index();
         if !n_honest.into_range().contains(&ix) {
             let exit_tx = spawn_malicious_member(spawner.clone(), ix, n_members, 2, network);
@@ -235,9 +236,9 @@ async fn honest_members_agree_on_batches_byzantine(
         }
     }
 
-    let mut batches = vec![];
+    let mut batches = Vec::new();
     for mut rx in batch_rxs.drain(..) {
-        let mut batches_per_ix = vec![];
+        let mut batches_per_ix = Vec::new();
         for _ in 0..n_batches {
             let batch = rx.next().await.unwrap();
             batches_per_ix.push(batch);
