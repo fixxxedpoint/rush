@@ -23,6 +23,7 @@ use std::{
     collections::{BinaryHeap, HashSet},
     fmt::Debug,
     iter::repeat,
+    marker::PhantomData,
     time,
 };
 
@@ -138,27 +139,22 @@ impl<H: Hasher> PartialOrd for ScheduledTask<H> {
 /// For a detailed description of the consensus implemented in Member see
 /// [docs for devs](https://cardinal-cryptography.github.io/AlephBFT/index.html)
 /// or the [original paper](https://arxiv.org/abs/1908.05156).
-pub struct Member<'a, H, D, DP, MK, SH>
+pub struct Member<'a, D, DP, MK, SH>
 where
-    H: Hasher,
     D: Data,
     DP: DataIO<D> + Send,
     MK: MultiKeychain,
     SH: SpawnHandle,
 {
     config: Config,
-    data_io: Option<DP>,
+    data_io: DP,
     keybox: &'a MK,
-    task_queue: BinaryHeap<ScheduledTask<H>>,
-    requested_coords: HashSet<UnitCoord>,
-    n_members: NodeCount,
     spawn_handle: SH,
-    scheduled_units: Vec<UncheckedSignedUnit<H, D, MK::Signature>>,
+    _phantom: PhantomData<D>,
 }
 
-impl<'a, H, D, DP, MK, SH> Member<'a, H, D, DP, MK, SH>
+impl<'a, D, DP, MK, SH> Member<'a, D, DP, MK, SH>
 where
-    H: Hasher,
     D: Data,
     DP: DataIO<D> + Send,
     MK: MultiKeychain,
@@ -168,54 +164,56 @@ where
     /// makes an extensive use of asynchronous features of Rust, so creating a new Member doesn't start it.
     /// See [`Member::run_session`].
     pub fn new(data_io: DP, keybox: &'a MK, config: Config, spawn_handle: SH) -> Self {
-        let n_members = config.n_members;
         Member {
             config,
-            data_io: Some(data_io),
+            data_io,
             keybox,
-            task_queue: BinaryHeap::new(),
-            requested_coords: HashSet::new(),
-            n_members,
             spawn_handle,
-            scheduled_units: Vec::new(),
+            _phantom: PhantomData,
         }
-    }
-
-    fn index(&self) -> NodeIndex {
-        self.config.node_ix
     }
 }
 
-struct InitializedMember<'a, H, D, DP, MK, SH>
+struct InitializedMember<H, D, MK, SH>
 where
     H: Hasher,
     D: Data,
-    DP: DataIO<D> + Send,
     MK: MultiKeychain,
     SH: SpawnHandle,
 {
-    member: Member<'a, H, D, DP, MK, SH>,
+    config: Config,
+    task_queue: BinaryHeap<ScheduledTask<H>>,
+    requested_coords: HashSet<UnitCoord>,
+    n_members: NodeCount,
+    spawn_handle: SH,
+    scheduled_units: Vec<UncheckedSignedUnit<H, D, MK::Signature>>,
     runway_facade: RunwayFacade<H, D, MK>,
     unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
     unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
 }
 
-impl<'a, H, D, DP, MK, SH> InitializedMember<'a, H, D, DP, MK, SH>
+impl<H, D, MK, SH> InitializedMember<H, D, MK, SH>
 where
     H: Hasher,
     D: Data,
-    DP: DataIO<D> + Send,
     MK: MultiKeychain,
     SH: SpawnHandle,
 {
     fn new(
-        member: Member<'a, H, D, DP, MK, SH>,
+        config: Config,
+        spawn_handle: SH,
         runway_facade: RunwayFacade<H, D, MK>,
         unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
         unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
     ) -> Self {
+        let n_members = config.n_members;
         Self {
-            member,
+            config,
+            task_queue: BinaryHeap::new(),
+            requested_coords: HashSet::new(),
+            n_members,
+            spawn_handle,
+            scheduled_units: Vec::new(),
             runway_facade,
             unit_messages_for_network,
             unit_messages_from_network,
@@ -223,11 +221,10 @@ where
     }
 }
 
-impl<'a, H, D, DP, MK, SH> InitializedMember<'a, H, D, DP, MK, SH>
+impl<H, D, MK, SH> InitializedMember<H, D, MK, SH>
 where
     H: Hasher,
     D: Data,
-    DP: DataIO<D> + Send + 'static,
     MK: MultiKeychain,
     SH: SpawnHandle,
 {
@@ -240,22 +237,20 @@ where
         info!(target: "AlephBFT-member", "{:?} Spawning network.", self.index());
         let index = self.index();
         let (network_exit, exit_stream) = oneshot::channel();
-        let network_handle =
-            self.member
-                .spawn_handle
-                .spawn_essential("member/network", async move {
-                    network.run(exit_stream).await;
-                });
+        let network_handle = self
+            .spawn_handle
+            .spawn_essential("member/network", async move {
+                network.run(exit_stream).await;
+            });
         let mut network_handle = into_infinite_stream(network_handle).fuse();
         info!(target: "AlephBFT-member", "{:?} Network spawned.", self.index());
 
         info!(target: "AlephBFT-member", "{:?} Initializing Runway.", self.index());
 
-        let runway_future = runway_future.fuse();
         let runway_future = into_infinite_stream(runway_future).fuse();
         pin_mut!(runway_future);
 
-        let ticker_delay = self.member.config.delay_config.tick_interval;
+        let ticker_delay = self.config.delay_config.tick_interval;
         let mut ticker = Delay::new(ticker_delay).fuse();
 
         info!(target: "AlephBFT-member", "{:?} Runway initialized.", index);
@@ -310,54 +305,48 @@ where
     }
 }
 
-impl<'a, H, D, DP, MK, SH> InitializedMember<'a, H, D, DP, MK, SH>
+impl<H, D, MK, SH> InitializedMember<H, D, MK, SH>
 where
     H: Hasher,
     D: Data,
-    DP: 'static + DataIO<D> + Send,
     MK: MultiKeychain,
     SH: SpawnHandle,
 {
     fn on_create(&mut self, u: UncheckedSignedUnit<H, D, MK::Signature>) {
-        let index = self.member.scheduled_units.len();
-        self.member.scheduled_units.push(u);
+        let index = self.scheduled_units.len();
+        self.scheduled_units.push(u);
         let curr_time = time::Instant::now();
         let task = ScheduledTask::new(Task::UnitMulticast(index), curr_time);
-        self.member.task_queue.push(task);
-        self.trigger_tasks();
+        self.task_queue.push(task);
     }
 
     fn on_request_coord(&mut self, coord: UnitCoord) {
         trace!(target: "AlephBFT-member", "{:?} Dealing with missing coord notification {:?}.", self.index(), coord);
-        if !self.member.requested_coords.insert(coord) {
+        if !self.requested_coords.insert(coord) {
             return;
         }
         let curr_time = time::Instant::now();
         let task = ScheduledTask::new(Task::CoordRequest(coord), curr_time);
-        self.member.task_queue.push(task);
+        self.task_queue.push(task);
         self.trigger_tasks();
     }
 
     fn on_request_parents(&mut self, u_hash: H::Hash, peer_id: NodeIndex) {
         let curr_time = time::Instant::now();
         let task = ScheduledTask::new(Task::ParentsRequest(u_hash, peer_id), curr_time);
-        self.member.task_queue.push(task);
+        self.task_queue.push(task);
         self.trigger_tasks();
     }
 
     // Pulls tasks from the priority queue (sorted by scheduled time) and sends them to random peers
     // as long as they are scheduled at time <= curr_time
     fn trigger_tasks(&mut self) {
-        while let Some(request) = self.member.task_queue.peek() {
+        while let Some(request) = self.task_queue.peek() {
             let curr_time = time::Instant::now();
             if request.scheduled_time > curr_time {
                 break;
             }
-            let mut request = self
-                .member
-                .task_queue
-                .pop()
-                .expect("The element was peeked");
+            let mut request = self.task_queue.pop().expect("The element was peeked");
             if let Some((message, recipient, delay)) =
                 self.task_details(&request.task, request.counter)
             {
@@ -366,19 +355,19 @@ where
                     .expect("Channel to network should be open");
                 request.scheduled_time += delay;
                 request.counter += 1;
-                self.member.task_queue.push(request);
+                self.task_queue.push(request);
             }
         }
     }
 
     fn random_peer(&self) -> NodeIndex {
         rand::thread_rng()
-            .gen_range(0..self.member.n_members.into())
+            .gen_range(0..self.n_members.into())
             .into()
     }
 
     fn index(&self) -> NodeIndex {
-        self.member.config.node_ix
+        self.config.node_ix
     }
 
     fn send_unit_message(&mut self, message: UnitMessage<H, D, MK::Signature>, peer_id: NodeIndex) {
@@ -416,7 +405,6 @@ where
             }
             Task::UnitMulticast(index) => {
                 let signed_unit = self
-                    .member
                     .scheduled_units
                     .get(*index)
                     .cloned()
@@ -429,7 +417,7 @@ where
         let (recipient, delay) = match preferred_recipient {
             Recipient::Everyone => (
                 Recipient::Everyone,
-                (self.member.config.delay_config.unit_broadcast_delay)(counter),
+                (self.config.delay_config.unit_broadcast_delay)(counter),
             ),
             Recipient::Node(preferred_id) => {
                 let recipient = if counter == 0 {
@@ -439,7 +427,7 @@ where
                 };
                 (
                     Recipient::Node(recipient),
-                    self.member.config.delay_config.requests_interval,
+                    self.config.delay_config.requests_interval,
                 )
             }
         };
@@ -475,9 +463,8 @@ where
     }
 }
 
-impl<'a, H, D, DP, MK, SH> Member<'a, H, D, DP, MK, SH>
+impl<'a, D, DP, MK, SH> Member<'a, D, DP, MK, SH>
 where
-    H: Hasher,
     D: Data,
     DP: DataIO<D> + Send + 'static,
     MK: MultiKeychain,
@@ -486,13 +473,14 @@ where
     /// Actually start the Member as an async task. It stops establishing consensus for new data items after
     /// reaching the threshold specified in [`Config::max_round`] or upon receiving a stop signal from `exit`.
     pub async fn run_session<
+        H: Hasher,
         N: Network<H, D, MK::Signature, MK::PartialMultisignature> + 'static,
     >(
-        mut self,
+        self,
         network: N,
         exit: oneshot::Receiver<()>,
     ) {
-        let index = self.index();
+        let index = self.config.node_ix;
         info!(target: "AlephBFT-member", "{:?} Spawning party for a session.", index);
 
         let (alert_messages_for_alerter, alert_messages_from_network) = mpsc::unbounded();
@@ -511,7 +499,7 @@ where
         let runway = InitializedRunway::new(
             self.config.clone(),
             self.keybox.clone(),
-            self.data_io.take().unwrap(),
+            self.data_io,
             self.spawn_handle.clone(),
             alert_messages_for_network,
             alert_messages_from_network,
@@ -519,7 +507,8 @@ where
         let (runway_facade, runway_future) = runway.start();
 
         let initialized_member = InitializedMember::new(
-            self,
+            self.config,
+            self.spawn_handle,
             runway_facade,
             unit_messages_for_network,
             unit_messages_from_network,
