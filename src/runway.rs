@@ -193,10 +193,11 @@ where
         let n_members = config.n_members;
         let threshold = (n_members * 2) / 3 + NodeCount(1);
         let max_round = config.max_round;
-        let store = UnitStore::new(n_members, threshold, max_round);
+        let store = UnitStore::new(n_members, max_round);
 
         let runway = Runway {
             config,
+            threshold,
             store,
             keybox: keychain.clone(),
             alerts_for_alerter,
@@ -256,6 +257,7 @@ where
     SH: SpawnHandle,
 {
     config: Config,
+    threshold: NodeCount,
     store: UnitStore<H, D, MK>,
     keybox: MK,
     alerts_for_alerter: Sender<Alert<H, D, MK::Signature>>,
@@ -407,7 +409,7 @@ where
     }
 
     fn threshold(&self) -> NodeCount {
-        (self.config.n_members * 2) / 3 + NodeCount(1)
+        self.threshold
     }
 
     fn on_new_forker_detected(&mut self, forker: NodeIndex, proof: ForkProof<H, D, MK::Signature>) {

@@ -16,7 +16,7 @@ pub(crate) struct UnitStore<H: Hasher, D: Data, KB: KeyBox> {
 }
 
 impl<H: Hasher, D: Data, KB: KeyBox> UnitStore<H, D, KB> {
-    pub(crate) fn new(n_nodes: NodeCount, threshold: NodeCount, max_round: Round) -> Self {
+    pub(crate) fn new(n_nodes: NodeCount, max_round: Round) -> Self {
         UnitStore {
             by_coord: HashMap::new(),
             by_hash: HashMap::new(),

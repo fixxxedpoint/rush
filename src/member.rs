@@ -149,7 +149,7 @@ where
     config: Config,
     data_io: Option<DP>,
     keybox: &'a MK,
-    requests: BinaryHeap<ScheduledTask<H>>,
+    task_queue: BinaryHeap<ScheduledTask<H>>,
     requested_coords: HashSet<UnitCoord>,
     n_members: NodeCount,
     spawn_handle: SH,
@@ -173,7 +173,7 @@ where
             config,
             data_io: Some(data_io),
             keybox,
-            requests: BinaryHeap::new(),
+            task_queue: BinaryHeap::new(),
             requested_coords: HashSet::new(),
             n_members,
             spawn_handle,
@@ -323,34 +323,41 @@ where
         self.member.scheduled_units.push(u);
         let curr_time = time::Instant::now();
         let task = ScheduledTask::new(Task::UnitMulticast(index), curr_time);
-        self.member.requests.push(task);
+        self.member.task_queue.push(task);
         self.trigger_tasks();
     }
 
     fn on_request_coord(&mut self, coord: UnitCoord) {
         trace!(target: "AlephBFT-member", "{:?} Dealing with missing coord notification {:?}.", self.index(), coord);
+        if !self.member.requested_coords.insert(coord) {
+            return;
+        }
         let curr_time = time::Instant::now();
         let task = ScheduledTask::new(Task::CoordRequest(coord), curr_time);
-        self.member.requests.push(task);
+        self.member.task_queue.push(task);
         self.trigger_tasks();
     }
 
     fn on_request_parents(&mut self, u_hash: H::Hash, peer_id: NodeIndex) {
         let curr_time = time::Instant::now();
         let task = ScheduledTask::new(Task::ParentsRequest(u_hash, peer_id), curr_time);
-        self.member.requests.push(task);
+        self.member.task_queue.push(task);
         self.trigger_tasks();
     }
 
     // Pulls tasks from the priority queue (sorted by scheduled time) and sends them to random peers
     // as long as they are scheduled at time <= curr_time
     fn trigger_tasks(&mut self) {
-        while let Some(request) = self.member.requests.peek() {
+        while let Some(request) = self.member.task_queue.peek() {
             let curr_time = time::Instant::now();
             if request.scheduled_time > curr_time {
                 break;
             }
-            let mut request = self.member.requests.pop().expect("The element was peeked");
+            let mut request = self
+                .member
+                .task_queue
+                .pop()
+                .expect("The element was peeked");
             if let Some((message, recipient, delay)) =
                 self.task_details(&request.task, request.counter)
             {
@@ -359,7 +366,7 @@ where
                     .expect("Channel to network should be open");
                 request.scheduled_time += delay;
                 request.counter += 1;
-                self.member.requests.push(request);
+                self.member.task_queue.push(request);
             }
         }
     }
