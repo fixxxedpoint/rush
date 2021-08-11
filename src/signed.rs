@@ -183,9 +183,6 @@ impl<T: Signable, S: Signature> From<UncheckedSigned<Indexed<T>, S>> for Uncheck
 }
 
 /// A correctly signed object of type `T`.
-///
-/// The correctness is guaranteed by storing a (phantom) reference to the `KeyBox` that verified
-/// the signature.
 #[derive(Debug)]
 pub struct Signed<T: Signable + Index, KB: KeyBox> {
     unchecked: UncheckedSigned<T, KB::Signature>,

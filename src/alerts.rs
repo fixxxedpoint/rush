@@ -418,7 +418,7 @@ impl<H: Hasher, D: Data, MK: MultiKeychain> Alerter<H, D, MK> {
             .expect("Channel should be open")
     }
 
-    pub(crate) async fn run(mut self, mut exit: oneshot::Receiver<()>) {
+    pub(crate) async fn run(&mut self, mut exit: oneshot::Receiver<()>) {
         loop {
             futures::select! {
                 message = self.messages_from_network.next() => match message {
@@ -449,6 +449,7 @@ impl<H: Hasher, D: Data, MK: MultiKeychain> Alerter<H, D, MK> {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn run<H: Hasher, D: Data, MK: MultiKeychain>(
     keychain: MK,
     messages_for_network: Sender<(

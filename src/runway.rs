@@ -22,6 +22,70 @@ use futures::{
 use log::{debug, error, info, trace, warn};
 use tokio::sync::Barrier;
 
+#[derive(Clone)]
+pub(crate) struct TrackedRequest {
+    satisfied: Arc<AtomicBool>,
+}
+
+impl TrackedRequest {
+    fn new() -> Self {
+        TrackedRequest {
+            satisfied: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn is_satisfied(&self) -> bool {
+        self.satisfied.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set_satisfied(&mut self) {
+        self.satisfied
+            .store(true, std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+struct RequestTracker<H: Hasher> {
+    missing_coords: HashMap<UnitCoord, TrackedRequest>,
+    missing_parents: HashMap<H::Hash, TrackedRequest>,
+}
+
+impl<H: Hasher> RequestTracker<H> {
+    fn new() -> Self {
+        RequestTracker {
+            missing_coords: HashMap::new(),
+            missing_parents: HashMap::new(),
+        }
+    }
+
+    fn get_missing_coords_request(&mut self, coord: &UnitCoord) -> TrackedRequest {
+        self.missing_coords
+            .entry(*coord)
+            .or_insert_with(TrackedRequest::new)
+            .clone()
+    }
+
+    fn get_missing_parents_request(&mut self, u_hash: &H::Hash) -> TrackedRequest {
+        self.missing_parents
+            .entry(*u_hash)
+            .or_insert_with(TrackedRequest::new)
+            .clone()
+    }
+
+    fn parents_resolved(&mut self, u_hash: &H::Hash) {
+        self.missing_parents
+            .remove(u_hash)
+            .into_iter()
+            .for_each(|mut req| req.set_satisfied());
+    }
+
+    fn coordinates_resolved(&mut self, coord: &UnitCoord) {
+        self.missing_coords
+            .remove(coord)
+            .into_iter()
+            .for_each(|mut req| req.set_satisfied())
+    }
+}
+
 pub(crate) enum OutgoingMessage<M> {
     WithTrackedRequest(TrackedRequest, M),
     Raw(M),
@@ -241,11 +305,6 @@ where
             async move { runway.run(exit_stream, alerter, consensus).await },
         )
     }
-
-    // pub(crate) async fn run(mut self, mut exit: oneshot::Receiver<()>) {
-    //     todo!("start a new parallel task and return a handle to it");
-    //     self.runway.run(exit, self.alerter, self.consensus).await
-    // }
 }
 
 pub(crate) struct Runway<H, D, MK, DP, SH>
@@ -609,7 +668,7 @@ where
             let message = UnitMessage::<H, D, MK::Signature>::RequestCoord(self.index(), coord);
             self.unit_messages_for_network
                 .unbounded_send(OutgoingMessage::WithTrackedRequest(
-                    self.request_tracker.new_missing_coords_request(&coord),
+                    self.request_tracker.get_missing_coords_request(&coord),
                     (message, Recipient::Everyone),
                 ))
                 .expect("network's channel should be open");
@@ -638,7 +697,7 @@ where
             let message = UnitMessage::<H, D, MK::Signature>::RequestParents(self.index(), u_hash);
             self.unit_messages_for_network
                 .unbounded_send(OutgoingMessage::WithTrackedRequest(
-                    self.request_tracker.new_missing_parents_request(&u_hash),
+                    self.request_tracker.get_missing_parents_request(&u_hash),
                     (message, recipient),
                 ))
                 .expect("network's channel should be open");
@@ -696,6 +755,7 @@ where
         let alerter_handle = self
             .spawn_handle
             .spawn_essential("runway/alerter", async move {
+                let mut alerter = alerter;
                 alerter.run(exit_stream).await;
                 alerter_barrier.wait().await;
             });
@@ -773,69 +833,5 @@ where
         alerter_handle.next().await.unwrap();
 
         info!(target: "AlephBFT-runway", "{:?} Run ended.", index);
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct TrackedRequest {
-    satisfied: Arc<AtomicBool>,
-}
-
-impl TrackedRequest {
-    fn new() -> Self {
-        TrackedRequest {
-            satisfied: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    fn is_satisfied(&self) -> bool {
-        self.satisfied.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    fn set_satisfied(&mut self) {
-        self.satisfied
-            .store(true, std::sync::atomic::Ordering::Relaxed)
-    }
-}
-
-struct RequestTracker<H: Hasher> {
-    missing_coords: HashMap<UnitCoord, TrackedRequest>,
-    missing_parents: HashMap<H::Hash, TrackedRequest>,
-}
-
-impl<H: Hasher> RequestTracker<H> {
-    fn new() -> Self {
-        RequestTracker {
-            missing_coords: HashMap::new(),
-            missing_parents: HashMap::new(),
-        }
-    }
-
-    fn new_missing_coords_request(&mut self, coord: &UnitCoord) -> TrackedRequest {
-        self.missing_coords
-            .entry(*coord)
-            .or_insert_with(TrackedRequest::new)
-            .clone()
-    }
-
-    fn new_missing_parents_request(&mut self, u_hash: &H::Hash) -> TrackedRequest {
-        self.missing_parents
-            .entry(*u_hash)
-            .or_insert_with(TrackedRequest::new)
-            .clone()
-    }
-
-    fn parents_resolved(&mut self, u_hash: &H::Hash) {
-        self.missing_parents
-            .remove(u_hash)
-            .into_iter()
-            .for_each(|mut req| req.set_satisfied());
-    }
-
-    fn coordinates_resolved(&mut self, coord: &UnitCoord) {
-        self.missing_coords
-            .remove(coord)
-            .into_iter()
-            .for_each(|mut req| req.set_satisfied())
     }
 }
