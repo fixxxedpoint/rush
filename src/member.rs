@@ -1,7 +1,10 @@
 use crate::{
     config::Config,
     network::{NetworkHub, Recipient},
-    runway::{InitializedRunway, RunwayFacade, TrackedRequest},
+    runway::{
+        InitializedRunway, Request, Response, RunwayFacade, RunwayNotificationIn,
+        RunwayNotificationOut, TrackedRequest,
+    },
     signed::Signature,
     units::{PreUnit, UncheckedSignedUnit, Unit, UnitCoord},
     utils::into_infinite_stream,
@@ -83,8 +86,8 @@ pub(crate) enum NotificationOut<H: Hasher> {
 pub(crate) enum Task<H: Hasher, D: Data, S: Signature + PartialEq> {
     // Request the unit with the given (creator, round) coordinates.
     CoordRequest(UnitCoord, TrackedRequest),
-    // Request parents of the unit with the given hash and NodeIndex.
-    ParentsRequest(H::Hash, NodeIndex, TrackedRequest),
+    // Request parents of the unit with the given hash and Recipient.
+    ParentsRequest(H::Hash, Recipient, TrackedRequest),
     // Broadcast the given unit.
     UnitMulticast(UncheckedSignedUnit<H, D, S>),
 }
@@ -228,20 +231,25 @@ where
         self.task_queue.push(task);
     }
 
-    fn on_request_coord(&mut self, coord: UnitCoord) {
+    fn on_request_coord(&mut self, coord: UnitCoord, tracker: TrackedRequest) {
         trace!(target: "AlephBFT-member", "{:?} Dealing with missing coord notification {:?}.", self.index(), coord);
         if !self.requested_coords.insert(coord) {
             return;
         }
         let curr_time = time::Instant::now();
-        let task = ScheduledTask::new(Task::CoordRequest(coord), curr_time);
+        let task = ScheduledTask::new(Task::CoordRequest(coord, tracker), curr_time);
         self.task_queue.push(task);
         self.trigger_tasks();
     }
 
-    fn on_request_parents(&mut self, u_hash: H::Hash, peer_id: NodeIndex) {
+    fn on_request_parents(
+        &mut self,
+        u_hash: H::Hash,
+        recipient: Recipient,
+        tracker: TrackedRequest,
+    ) {
         let curr_time = time::Instant::now();
-        let task = ScheduledTask::new(Task::ParentsRequest(u_hash, peer_id), curr_time);
+        let task = ScheduledTask::new(Task::ParentsRequest(u_hash, recipient, tracker), curr_time);
         self.task_queue.push(task);
         self.trigger_tasks();
     }
@@ -278,9 +286,13 @@ where
         self.config.node_ix
     }
 
-    fn send_unit_message(&mut self, message: UnitMessage<H, D, MK::Signature>, peer_id: NodeIndex) {
+    fn send_unit_message(
+        &mut self,
+        message: UnitMessage<H, D, MK::Signature>,
+        recipient: Recipient,
+    ) {
         self.unit_messages_for_network
-            .unbounded_send((message, Recipient::Node(peer_id)))
+            .unbounded_send((message, recipient))
             .expect("Channel to network should be open")
     }
 
@@ -296,23 +308,23 @@ where
         // and Node(node_id) if the message should be send to one peer (node_id when
         // the task is done for the first time or a random peer otherwise)
         let (message, preferred_recipient) = match task {
-            Task::CoordRequest(coord) => {
-                if !self.runway_facade.missing_coords(coord) {
+            Task::CoordRequest(coord, tracker) => {
+                if tracker.is_satisfied() {
                     return None;
                 }
                 let message = UnitMessage::RequestCoord(self.index(), *coord);
                 let preferred_recipient = Recipient::Node(coord.creator());
                 (message, preferred_recipient)
             }
-            Task::ParentsRequest(hash, preferred_id) => {
-                if !self.runway_facade.missing_parents(hash) {
+            Task::ParentsRequest(hash, preferred_id, tracker) => {
+                if tracker.is_satisfied() {
                     return None;
                 }
                 let message = UnitMessage::RequestParents(self.index(), *hash);
-                (message, Recipient::Node(*preferred_id))
+                (message, *preferred_id)
             }
             Task::UnitMulticast(signed_unit) => {
-                let message = UnitMessage::NewUnit(signed_unit);
+                let message = UnitMessage::NewUnit(*signed_unit);
                 let preferred_recipient = Recipient::Everyone;
                 (message, preferred_recipient)
             }
@@ -337,29 +349,27 @@ where
         Some((message, recipient, delay))
     }
 
-    fn on_unit_message_from_units(
-        &mut self,
-        message: UnitMessage<H, D, MK::Signature>,
-        recipient: Recipient,
-    ) {
+    fn on_unit_message_from_units(&mut self, message: RunwayNotificationOut<H, D, MK::Signature>) {
         match message {
-            UnitMessage::NewUnit(u) => self.on_create(u),
-            UnitMessage::RequestCoord(_, coord) => self.on_request_coord(coord, tracked_request),
-            UnitMessage::RequestParents(peer_id, hash) => self.on_request_parents(hash, peer_id),
-            UnitMessage::ResponseCoord(_) => match recipient {
-                Recipient::Node(peer_id) => {
-                    self.send_unit_message(message, peer_id);
+            crate::runway::RunwayNotification::NewUnit(u) => self.on_create(u),
+            crate::runway::RunwayNotification::Request((request, recipient, tracker)) => {
+                match request {
+                    crate::runway::Request::RequestCoord(coord) => {
+                        self.on_request_coord(coord, tracker)
+                    }
+                    crate::runway::Request::RequestParents(u_hash) => {
+                        self.on_request_parents(u_hash, recipient, tracker)
+                    }
                 }
-                _ => {
-                    warn!(target: "AlephBFT-member", "{:?} Missing Recipient for a ResponseCoord message.", self.index());
+            }
+            crate::runway::RunwayNotification::Response((response, recipient)) => match response {
+                crate::runway::Response::ResponseCoord(u) => {
+                    let message = UnitMessage::ResponseCoord(u);
+                    self.send_unit_message(message, recipient)
                 }
-            },
-            UnitMessage::ResponseParents(_, _) => match recipient {
-                Recipient::Node(peer_id) => {
-                    self.send_unit_message(message, peer_id);
-                }
-                _ => {
-                    warn!(target: "AlephBFT-member", "{:?} Missing Recipient for a ResponseParents message.", self.index());
+                crate::runway::Response::ResponseParents(u_hash, parents) => {
+                    let message = UnitMessage::ResponseParents(u_hash, parents);
+                    self.send_unit_message(message, recipient)
                 }
             },
         }
@@ -400,8 +410,8 @@ where
                 },
 
                 event = self.runway_facade.next_outgoing_message().fuse() => match event {
-                    Some((message, recipient)) => {
-                        self.on_unit_message_from_units(message, recipient);
+                    Some(message) => {
+                        self.on_unit_message_from_units(message);
                     },
                     None => {
                         error!(target: "AlephBFT-member", "{:?} Unit message stream from Runway closed.", index);
@@ -411,7 +421,7 @@ where
 
                 event = self.unit_messages_from_network.next() => match event {
                     Some(message) => {
-                        self.runway_facade.enqueue_message(message);
+                        self.send_notification_to_runway(message)
                     },
                     None => {
                         error!(target: "AlephBFT-member", "{:?} Unit message stream from network closed.", index);
@@ -439,6 +449,25 @@ where
         }
         network_handle.next().await.unwrap();
         debug!(target: "AlephBFT-member", "{:?} Member stopped.", index);
+    }
+
+    fn send_notification_to_runway(&mut self, message: UnitMessage<H, D, MK::Signature>) {
+        let notification = match message {
+            UnitMessage::NewUnit(u) => RunwayNotificationIn::NewUnit(u),
+            UnitMessage::RequestCoord(peer_id, coord) => {
+                RunwayNotificationIn::Request((Request::RequestCoord(coord), peer_id))
+            }
+            UnitMessage::RequestParents(peer_id, u_hash) => {
+                RunwayNotificationIn::Request((Request::RequestParents(u_hash), peer_id))
+            }
+            UnitMessage::ResponseCoord(u) => {
+                RunwayNotificationIn::Response(Response::ResponseCoord(u))
+            }
+            UnitMessage::ResponseParents(u_hash, parents) => {
+                RunwayNotificationIn::Response(Response::ResponseParents(u_hash, parents))
+            }
+        };
+        self.runway_facade.enqueue_notification(notification)
     }
 }
 

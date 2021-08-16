@@ -27,10 +27,7 @@ pub(crate) enum Request<H: Hasher> {
     RequestParents(H::Hash),
 }
 
-pub(crate) struct RequestIn<H: Hasher> {
-    request: Request<H>,
-    source: NodeIndex,
-}
+pub(crate) type RequestIn<H: Hasher> = (Request<H>, NodeIndex);
 
 pub(crate) type RequestOut<H: Hasher> = (Request<H>, Recipient, TrackedRequest);
 
@@ -52,10 +49,10 @@ pub(crate) enum RunwayNotification<H: Hasher, D: Data, S: Signature, ROut, RIn> 
 pub(crate) type RunwayNotificationOut<H: Hasher, D: Data, S: Signature> =
     RunwayNotification<H, D, S, RequestOut<H>, ResponseOut<H, D, S>>;
 
-type RunwayNotificationIn<H: Hasher, D: Data, S: Signature> =
+pub(crate) type RunwayNotificationIn<H: Hasher, D: Data, S: Signature> =
     RunwayNotification<H, D, S, RequestIn<H>, Response<H, D, S>>;
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct TrackedRequest {
     satisfied: Arc<AtomicBool>,
 }
@@ -67,7 +64,7 @@ impl TrackedRequest {
         }
     }
 
-    fn is_satisfied(&self) -> bool {
+    pub(crate) fn is_satisfied(&self) -> bool {
         self.satisfied.load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -355,12 +352,12 @@ where
                 trace!(target: "AlephBFT-runway", "{:?} New unit received {:?}.", self.index(), &u);
                 self.on_unit_received(u, false)
             }
-            RunwayNotification::Request(req) => match req {
-                Request::RequestCoord(peer_id, coord) => {
+            RunwayNotification::Request((request, peer_id)) => match request {
+                Request::RequestCoord(coord) => {
                     trace!(target: "AlephBFT-runway", "{:?} Coords request received {:?}.", self.index(), coord);
                     self.on_request_coord(peer_id, coord);
                 }
-                Request::RequestParents(peer_id, u_hash) => {
+                Request::RequestParents(u_hash) => {
                     trace!(target: "AlephBFT-runway", "{:?} Parents request received {:?}.", self.index(), u_hash);
                     self.on_request_parents(peer_id, u_hash);
                 }
@@ -542,6 +539,7 @@ where
                     Response::ResponseParents(u_hash, full_units),
                     Recipient::Node(peer_id),
                 )))
+                .expect("network channel should be open")
         } else {
             trace!(target: "AlephBFT-runway", "{:?} Not answering parents request for hash {:?}. Unit not in DAG yet.", self.index(), u_hash);
         }
