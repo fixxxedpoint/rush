@@ -6,11 +6,11 @@ use std::{
 use crate::{
     alerts::{Alert, AlertConfig, AlertMessage, Alerter, ForkProof, ForkingNotification},
     consensus::Consensus,
-    member::{NotificationIn, NotificationOut},
+    member::UnitMessage,
     network::Recipient,
     nodes::NodeMap,
     units::{
-        ControlHash, FullUnit, PreUnit, SignedUnit, UncheckedSignedUnit, UnitCoord, UnitStore,
+        ControlHash, FullUnit, PreUnit, SignedUnit, UncheckedSignedUnit, Unit, UnitCoord, UnitStore,
     },
     utils::{into_infinite_stream, Barrier},
     Config, Data, DataIO, Hasher, Index, MultiKeychain, NodeCount, NodeIndex, OrderedBatch,
@@ -22,18 +22,41 @@ use futures::{
 };
 use log::{debug, error, info, trace, warn};
 
+/// Type for incoming notifications: Runway to Consensus.
+#[derive(Clone, PartialEq)]
+pub(crate) enum NotificationIn<H: Hasher> {
+    /// A notification carrying a single unit. This might come either from multicast or
+    /// from a response to a request. This is of no importance at this layer.
+    NewUnits(Vec<Unit<H>>),
+    /// Response to a request to decode parents when the control hash is wrong.
+    UnitParents(H::Hash, Vec<H::Hash>),
+}
+
+/// Type for outgoing notifications: Consensus to Runway.
+#[derive(Debug, PartialEq)]
+pub(crate) enum NotificationOut<H: Hasher> {
+    /// Notification about a preunit created by this Consensus Node. Member is meant to
+    /// disseminate this preunit among other nodes.
+    CreatedPreUnit(PreUnit<H>, Vec<H::Hash>),
+    /// Notification that some units are needed but missing. The role of the Member
+    /// is to fetch these unit (somehow).
+    MissingUnits(Vec<UnitCoord>),
+    /// Notification that Consensus has parents incompatible with the control hash.
+    WrongControlHash(H::Hash),
+    /// Notification that a new unit has been added to the DAG, list of decoded parents provided
+    AddedToDag(H::Hash, Vec<H::Hash>),
+}
+
 pub(crate) enum Request<H: Hasher> {
     RequestCoord(UnitCoord),
     RequestParents(H::Hash),
 }
 
-pub(crate) type RequestIn<H: Hasher> = (Request<H>, NodeIndex);
+pub(crate) type RequestIn<H> = (Request<H>, NodeIndex);
 
-pub(crate) type RequestOut<H: Hasher> = (Request<H>, Recipient, TrackedRequest);
+pub(crate) type RequestOut<H> = (Request<H>, Recipient, TrackedRequest);
 
-// pub(crate) type RequestIn<H: Hasher> = RunwayRequestIn<H>;
-
-pub(crate) type ResponseOut<H: Hasher, D: Data, S: Signature> = (Response<H, D, S>, Recipient);
+pub(crate) type ResponseOut<H, D, S> = (Response<H, D, S>, Recipient);
 
 pub(crate) enum Response<H: Hasher, D: Data, S: Signature> {
     ResponseCoord(UncheckedSignedUnit<H, D, S>),
@@ -46,13 +69,35 @@ pub(crate) enum RunwayNotification<H: Hasher, D: Data, S: Signature, ROut, RIn> 
     Response(RIn),
 }
 
-pub(crate) type RunwayNotificationOut<H: Hasher, D: Data, S: Signature> =
+pub(crate) type RunwayNotificationOut<H, D, S> =
     RunwayNotification<H, D, S, RequestOut<H>, ResponseOut<H, D, S>>;
 
-pub(crate) type RunwayNotificationIn<H: Hasher, D: Data, S: Signature> =
+pub(crate) type RunwayNotificationIn<H, D, S> =
     RunwayNotification<H, D, S, RequestIn<H>, Response<H, D, S>>;
 
-#[derive(Clone, Eq, PartialEq)]
+impl<H: Hasher, D: Data, S: Signature> From<UnitMessage<H, D, S>>
+    for RunwayNotificationIn<H, D, S>
+{
+    fn from(message: UnitMessage<H, D, S>) -> Self {
+        match message {
+            UnitMessage::NewUnit(u) => RunwayNotificationIn::NewUnit(u),
+            UnitMessage::RequestCoord(peer_id, coord) => {
+                RunwayNotificationIn::Request((Request::RequestCoord(coord), peer_id))
+            }
+            UnitMessage::RequestParents(peer_id, u_hash) => {
+                RunwayNotificationIn::Request((Request::RequestParents(u_hash), peer_id))
+            }
+            UnitMessage::ResponseCoord(u) => {
+                RunwayNotificationIn::Response(Response::ResponseCoord(u))
+            }
+            UnitMessage::ResponseParents(u_hash, parents) => {
+                RunwayNotificationIn::Response(Response::ResponseParents(u_hash, parents))
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct TrackedRequest {
     satisfied: Arc<AtomicBool>,
 }
@@ -114,11 +159,6 @@ impl<H: Hasher> RequestTracker<H> {
             .into_iter()
             .for_each(|mut req| req.set_satisfied())
     }
-}
-
-pub(crate) enum OutgoingMessage<M> {
-    WithTrackedRequest(TrackedRequest, M),
-    Raw(M),
 }
 
 pub(crate) struct RunwayFacade<H, D, MK>
