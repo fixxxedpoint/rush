@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     network::{NetworkHub, Recipient},
-    runway::{InitializedRunway, RunwayFacade},
+    runway::{InitializedRunway, RunwayFacade, TrackedRequest},
     signed::Signature,
     units::{PreUnit, UncheckedSignedUnit, Unit, UnitCoord},
     utils::into_infinite_stream,
@@ -80,25 +80,25 @@ pub(crate) enum NotificationOut<H: Hasher> {
 }
 
 #[derive(Eq, PartialEq)]
-pub(crate) enum Task<H: Hasher> {
+pub(crate) enum Task<H: Hasher, D: Data, S: Signature + PartialEq> {
     // Request the unit with the given (creator, round) coordinates.
-    CoordRequest(UnitCoord),
+    CoordRequest(UnitCoord, TrackedRequest),
     // Request parents of the unit with the given hash and NodeIndex.
-    ParentsRequest(H::Hash, NodeIndex),
-    // Broadcast the unit with the given index (local storage).
-    UnitMulticast(usize),
+    ParentsRequest(H::Hash, NodeIndex, TrackedRequest),
+    // Broadcast the given unit.
+    UnitMulticast(UncheckedSignedUnit<H, D, S>),
 }
 
 #[derive(Eq, PartialEq)]
-struct ScheduledTask<H: Hasher> {
-    task: Task<H>,
+struct ScheduledTask<H: Hasher, D: Data, S: Signature + Eq + PartialEq> {
+    task: Task<H, D, S>,
     scheduled_time: time::Instant,
     // The number of times the task was performed so far.
     counter: usize,
 }
 
-impl<H: Hasher> ScheduledTask<H> {
-    fn new(task: Task<H>, scheduled_time: time::Instant) -> Self {
+impl<H: Hasher, D: Data, S: Signature + Eq + PartialEq> ScheduledTask<H, D, S> {
+    fn new(task: Task<H, D, S>, scheduled_time: time::Instant) -> Self {
         ScheduledTask {
             task,
             scheduled_time,
@@ -107,14 +107,14 @@ impl<H: Hasher> ScheduledTask<H> {
     }
 }
 
-impl<H: Hasher> Ord for ScheduledTask<H> {
+impl<H: Hasher, D: Data, S: Signature + Eq + PartialEq> Ord for ScheduledTask<H, D, S> {
     fn cmp(&self, other: &Self) -> Ordering {
         // we want earlier times to come first when used in max-heap, hence the below:
         other.scheduled_time.cmp(&self.scheduled_time)
     }
 }
 
-impl<H: Hasher> PartialOrd for ScheduledTask<H> {
+impl<H: Hasher, D: Data, S: Signature + Eq + PartialEq> PartialOrd for ScheduledTask<H, D, S> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -172,14 +172,14 @@ where
     H: Hasher,
     D: Data,
     MK: MultiKeychain,
+    MK::Signature: Eq + PartialEq,
     SH: SpawnHandle,
 {
     config: Config,
-    task_queue: BinaryHeap<ScheduledTask<H>>,
+    task_queue: BinaryHeap<ScheduledTask<H, D, MK::Signature>>,
     requested_coords: HashSet<UnitCoord>,
     n_members: NodeCount,
     spawn_handle: SH,
-    scheduled_units: Vec<UncheckedSignedUnit<H, D, MK::Signature>>,
     runway_facade: RunwayFacade<H, D, MK>,
     unit_messages_for_network: Sender<(UnitMessage<H, D, MK::Signature>, Recipient)>,
     unit_messages_from_network: Receiver<UnitMessage<H, D, MK::Signature>>,
@@ -190,6 +190,7 @@ where
     H: Hasher,
     D: Data,
     MK: MultiKeychain,
+    MK::Signature: Eq + PartialEq,
     SH: SpawnHandle,
 {
     fn new(
@@ -206,7 +207,6 @@ where
             requested_coords: HashSet::new(),
             n_members,
             spawn_handle,
-            scheduled_units: Vec::new(),
             runway_facade,
             unit_messages_for_network,
             unit_messages_from_network,
@@ -219,13 +219,12 @@ where
     H: Hasher,
     D: Data,
     MK: MultiKeychain,
+    MK::Signature: Eq + PartialEq,
     SH: SpawnHandle,
 {
     fn on_create(&mut self, u: UncheckedSignedUnit<H, D, MK::Signature>) {
-        let index = self.scheduled_units.len();
-        self.scheduled_units.push(u);
         let curr_time = time::Instant::now();
-        let task = ScheduledTask::new(Task::UnitMulticast(index), curr_time);
+        let task = ScheduledTask::new(Task::UnitMulticast(u), curr_time);
         self.task_queue.push(task);
     }
 
@@ -290,7 +289,7 @@ where
     /// and should be rescheduled after `delay`.
     fn task_details(
         &mut self,
-        task: &Task<H>,
+        task: &Task<H, D, MK::Signature>,
         counter: usize,
     ) -> Option<(UnitMessage<H, D, MK::Signature>, Recipient, time::Duration)> {
         // preferred_recipient is Everyone if the message is supposed to be broadcast,
@@ -312,12 +311,7 @@ where
                 let message = UnitMessage::RequestParents(self.index(), *hash);
                 (message, Recipient::Node(*preferred_id))
             }
-            Task::UnitMulticast(index) => {
-                let signed_unit = self
-                    .scheduled_units
-                    .get(*index)
-                    .cloned()
-                    .expect("unit should be stored");
+            Task::UnitMulticast(signed_unit) => {
                 let message = UnitMessage::NewUnit(signed_unit);
                 let preferred_recipient = Recipient::Everyone;
                 (message, preferred_recipient)
@@ -350,7 +344,7 @@ where
     ) {
         match message {
             UnitMessage::NewUnit(u) => self.on_create(u),
-            UnitMessage::RequestCoord(_, coord) => self.on_request_coord(coord),
+            UnitMessage::RequestCoord(_, coord) => self.on_request_coord(coord, tracked_request),
             UnitMessage::RequestParents(peer_id, hash) => self.on_request_parents(hash, peer_id),
             UnitMessage::ResponseCoord(_) => match recipient {
                 Recipient::Node(peer_id) => {
