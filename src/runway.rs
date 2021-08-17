@@ -56,7 +56,7 @@ pub(crate) type RequestIn<H> = (Request<H>, NodeIndex);
 
 pub(crate) type RequestOut<H> = (Request<H>, Recipient, TrackedRequest);
 
-pub(crate) type ResponseOut<H, D, S> = (Response<H, D, S>, Recipient);
+pub(crate) type ResponseOut<H, D, S> = (Response<H, D, S>, NodeIndex);
 
 pub(crate) enum Response<H: Hasher, D: Data, S: Signature> {
     ResponseCoord(UncheckedSignedUnit<H, D, S>),
@@ -199,26 +199,6 @@ where
             .expect("incoming_messages channel should be open")
     }
 
-    // pub(crate) fn process_new_unit(&mut self, unit: UncheckedSignedUnit<H, D, MK::Signature>) {
-    //     self.enqueue_notification(RunwayNotificationIn::NewUnit(unit))
-    // }
-
-    // pub(crate) fn process_coord_request(&mut self, ix: NodeIndex, coord: UnitCoord) {
-    //     self.enqueue_notification(RunwayNotificationIn::Request(RunwayRequest::RequestCoord(
-    //         ix, coord,
-    //     )))
-    // }
-
-    // pub(crate) fn process_parents_request(&mut self, ix: NodeIndex, hash: H::Hash) {
-    //     self.enqueue_notification(RunwayNotificationIn::Request(
-    //         RunwayRequest::RequestParents(ix, hash),
-    //     ))
-    // }
-
-    // pub(crate) fn process_coord_response() {}
-
-    // pub(crate) fn process_parents_response() {}
-
     pub(crate) async fn next_outgoing_message(
         &mut self,
     ) -> Option<RunwayNotificationOut<H, D, MK::Signature>> {
@@ -326,16 +306,7 @@ where
             incoming_messages: unit_messages_for_units,
         }
     }
-}
 
-impl<H, D, MK, DP, SH> InitializedRunway<H, D, MK, DP, SH>
-where
-    H: Hasher,
-    D: Data,
-    MK: MultiKeychain,
-    DP: DataIO<D>,
-    SH: SpawnHandle,
-{
     pub(crate) fn start(self) -> (RunwayFacade<H, D, MK>, impl Future<Output = ()>) {
         let (runway_exit, exit_stream) = oneshot::channel();
         let runway = self.runway;
@@ -546,7 +517,7 @@ where
             self.unit_messages_for_network
                 .unbounded_send(RunwayNotification::Response((
                     Response::ResponseCoord(su.into()),
-                    Recipient::Node(peer_id),
+                    peer_id,
                 )))
                 .expect("network's channel should be open");
         } else {
@@ -577,7 +548,7 @@ where
             self.unit_messages_for_network
                 .unbounded_send(RunwayNotificationOut::Response((
                     Response::ResponseParents(u_hash, full_units),
-                    Recipient::Node(peer_id),
+                    peer_id,
                 )))
                 .expect("network channel should be open")
         } else {
@@ -779,16 +750,7 @@ where
             .collect();
         self.send_consensus_notification(NotificationIn::NewUnits(units_to_move))
     }
-}
 
-impl<H, D, MK, DP, SH> Runway<H, D, MK, DP, SH>
-where
-    H: Hasher,
-    D: Data,
-    MK: MultiKeychain,
-    DP: DataIO<D>,
-    SH: SpawnHandle,
-{
     pub(crate) async fn run(
         mut self,
         mut exit: oneshot::Receiver<()>,

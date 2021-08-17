@@ -2,8 +2,8 @@ use crate::{
     config::Config,
     network::{NetworkHub, Recipient},
     runway::{
-        InitializedRunway, RunwayFacade, RunwayNotificationIn, RunwayNotificationOut,
-        TrackedRequest,
+        InitializedRunway, Request, Response, RunwayFacade, RunwayNotification,
+        RunwayNotificationIn, RunwayNotificationOut, TrackedRequest,
     },
     signed::Signature,
     units::{UncheckedSignedUnit, UnitCoord},
@@ -340,25 +340,21 @@ where
 
     fn on_unit_message_from_units(&mut self, message: RunwayNotificationOut<H, D, MK::Signature>) {
         match message {
-            crate::runway::RunwayNotification::NewUnit(u) => self.on_create(u),
-            crate::runway::RunwayNotification::Request((request, recipient, tracker)) => {
-                match request {
-                    crate::runway::Request::RequestCoord(coord) => {
-                        self.on_request_coord(coord, tracker)
-                    }
-                    crate::runway::Request::RequestParents(u_hash) => {
-                        self.on_request_parents(u_hash, recipient, tracker)
-                    }
+            RunwayNotification::NewUnit(u) => self.on_create(u),
+            RunwayNotification::Request((request, recipient, tracker)) => match request {
+                Request::RequestCoord(coord) => self.on_request_coord(coord, tracker),
+                crate::runway::Request::RequestParents(u_hash) => {
+                    self.on_request_parents(u_hash, recipient, tracker)
                 }
-            }
-            crate::runway::RunwayNotification::Response((response, recipient)) => match response {
-                crate::runway::Response::ResponseCoord(u) => {
+            },
+            RunwayNotification::Response((response, recipient)) => match response {
+                Response::ResponseCoord(u) => {
                     let message = UnitMessage::ResponseCoord(u);
-                    self.send_unit_message(message, recipient)
+                    self.send_unit_message(message, Recipient::Node(recipient))
                 }
-                crate::runway::Response::ResponseParents(u_hash, parents) => {
+                Response::ResponseParents(u_hash, parents) => {
                     let message = UnitMessage::ResponseParents(u_hash, parents);
-                    self.send_unit_message(message, recipient)
+                    self.send_unit_message(message, Recipient::Node(recipient))
                 }
             },
         }
