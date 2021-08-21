@@ -195,6 +195,9 @@ where
 
     fn on_request_coord(&mut self, coord: UnitCoord) {
         trace!(target: "AlephBFT-member", "{:?} Dealing with missing coord notification {:?}.", self.index(), coord);
+        if !self.not_resolved_coords.insert(coord) {
+            return;
+        }
         if !self.requested_coords.insert(coord) {
             return;
         }
@@ -205,6 +208,9 @@ where
     }
 
     fn on_request_parents(&mut self, u_hash: H::Hash, recipient: Recipient) {
+        if !self.not_resolved_parents.insert(u_hash) {
+            return;
+        }
         let curr_time = time::Instant::now();
         let task = ScheduledTask::new(Task::ParentsRequest(u_hash, recipient), curr_time);
         self.task_queue.push(task);
@@ -270,7 +276,7 @@ where
                 (message, preferred_recipient)
             }
             Task::ParentsRequest(hash, preferred_recipient) => {
-                if self.not_resolved_parents.contains(hash) {
+                if !self.not_resolved_parents.contains(hash) {
                     return None;
                 }
                 let message = UnitMessage::RequestParents(self.index(), *hash);
@@ -308,9 +314,7 @@ where
             RunwayNotification::NewUnit(u) => self.on_create(u),
             RunwayNotification::Request((request, recipient)) => match request {
                 Request::RequestCoord(coord) => self.on_request_coord(coord),
-                crate::runway::Request::RequestParents(u_hash) => {
-                    self.on_request_parents(u_hash, recipient)
-                }
+                Request::RequestParents(u_hash) => self.on_request_parents(u_hash, recipient),
             },
             RunwayNotification::Response((response, recipient)) => match response {
                 Response::ResponseCoord(u) => {
