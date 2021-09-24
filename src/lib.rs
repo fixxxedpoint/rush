@@ -3,8 +3,13 @@
 //! gives appropriate access to the set of available data that we need to make consensus on.
 
 use codec::{Decode, Encode};
-use futures::{channel::mpsc, Future};
-use std::{fmt::Debug, hash::Hash as StdHash, pin::Pin};
+use futures::{channel::mpsc, stream::Next, Future, Sink, SinkExt, StreamExt};
+use std::{
+    fmt::{self, Debug},
+    hash::Hash as StdHash,
+    marker::PhantomData,
+    pin::Pin,
+};
 
 use crate::nodes::NodeMap;
 
@@ -97,6 +102,135 @@ pub trait SpawnHandle: Clone + Send + 'static {
         name: &'static str,
         task: impl Future<Output = ()> + Send + 'static,
     ) -> TaskHandle;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SendErrorKind {
+    Full,
+    Disconnected,
+}
+
+/// The error type for [`Sender`s](Sender) used as `Sink`s.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SendError {
+    kind: SendErrorKind,
+}
+
+impl fmt::Display for SendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_full() {
+            write!(f, "send failed because channel is full")
+        } else {
+            write!(f, "send failed because receiver is gone")
+        }
+    }
+}
+
+impl std::error::Error for SendError {}
+
+impl SendError {
+    /// Returns `true` if this error is a result of the channel being full.
+    pub fn is_full(&self) -> bool {
+        match self.kind {
+            SendErrorKind::Full => true,
+            _ => false,
+        }
+    }
+
+    /// Returns `true` if this error is a result of the receiver being dropped.
+    pub fn is_disconnected(&self) -> bool {
+        match self.kind {
+            SendErrorKind::Disconnected => true,
+            _ => false,
+        }
+    }
+}
+
+/// The error type returned from [`try_send`](Sender::try_send).
+#[derive(Clone, PartialEq, Eq)]
+pub struct TrySendError<T> {
+    err: SendError,
+    val: T,
+}
+
+impl<T> From<mpsc::TrySendError<T>> for TrySendError<T> {
+    fn from(error: mpsc::TrySendError<T>) -> Self {
+        todo!()
+    }
+}
+
+impl<T> TrySendError<T> {
+    /// Returns `true` if this error is a result of the channel being full.
+    pub fn is_full(&self) -> bool {
+        self.err.is_full()
+    }
+
+    /// Returns `true` if this error is a result of the receiver being dropped.
+    pub fn is_disconnected(&self) -> bool {
+        self.err.is_disconnected()
+    }
+
+    /// Returns the message that was attempted to be sent but failed.
+    pub fn into_inner(self) -> T {
+        self.val
+    }
+
+    /// Drops the message and converts into a `SendError`.
+    pub fn into_send_error(self) -> SendError {
+        self.err
+    }
+}
+
+pub(crate) trait SenderT<T> {
+    fn send(&self, to_send: T) -> Result<(), TrySendError<T>>;
+}
+
+struct UnboundedSender<T>(mpsc::UnboundedSender<T>);
+
+impl<T> UnboundedSender<T> {
+    pub(crate) fn new(sender: mpsc::UnboundedSender<T>) -> Self {
+        Self(sender)
+    }
+}
+
+impl<T> SenderT<T> for UnboundedSender<T> {
+    fn send(&self, to_send: T) -> Result<(), TrySendError<T>> {
+        self.0.unbounded_send(to_send).map_err(TrySendError::from)
+    }
+}
+
+pub(crate) struct SenderImpl<T, S = UnboundedSender<T>>(S, PhantomData<T>);
+
+impl<T, S> SenderImpl<T, S> {
+    pub(crate) fn new(sender: S) -> Self {
+        Self(sender, PhantomData)
+    }
+}
+
+impl<T, S: SenderT<T>> SenderImpl<T, S> {
+    fn send(&self, to_send: T) -> Result<(), TrySendError<T>> {
+        self.0.send(to_send)
+    }
+}
+
+pub(crate) struct ReceiverImpl<T, R = mpsc::UnboundedReceiver<T>>(R, PhantomData<T>);
+
+impl<T, S: StreamExt<Item = T> + Unpin> ReceiverImpl<S, T> {
+    fn next(&mut self) -> Next<'_, S> {
+        self.0.next()
+    }
+}
+
+impl<T, S: StreamExt<Item = T> + Default> ReceiverImpl<T, S> {
+    pub(crate) fn new() -> Self {
+        Self(S::default(), PhantomData)
+    }
+}
+
+impl<T, S: StreamExt<Item = T> + Default> Default for ReceiverImpl<T, S> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub(crate) type Receiver<T> = mpsc::UnboundedReceiver<T>;
