@@ -426,7 +426,7 @@ pub async fn run_session<
     DP: DataIO<D>,
     N: Network<H, D, MK::Signature, MK::PartialMultisignature> + 'static,
     SH: SpawnHandle,
-    MK: MultiKeychain,
+    MK: MultiKeychain + 'static,
 >(
     config: Config,
     network: N,

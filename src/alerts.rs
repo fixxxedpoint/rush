@@ -147,7 +147,7 @@ struct Alerter<'a, H: Hasher, D: Data, MK: MultiKeychain> {
     notifications_for_units: Sender<ForkingNotification<H, D, MK::Signature>>,
     alerts_from_units: Receiver<Alert<H, D, MK::Signature>>,
     known_forkers: HashMap<NodeIndex, ForkProof<H, D, MK::Signature>>,
-    known_alerts: HashMap<H::Hash, Signed<'a, Alert<H, D, MK::Signature>, MK>>,
+    known_alerts: HashMap<H::Hash, Signed<Alert<H, D, MK::Signature>, MK>>,
     known_rmcs: HashMap<(NodeIndex, NodeIndex), H::Hash>,
     rmc: ReliableMulticast<'a, H::Hash, MK>,
     messages_from_rmc: Receiver<rmc::Message<H::Hash, MK::Signature, MK::PartialMultisignature>>,
@@ -160,7 +160,7 @@ pub(crate) struct AlertConfig {
     pub session_id: SessionId,
 }
 
-impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
+impl<'a, H: Hasher, D: Data, MK: MultiKeychain + 'static> Alerter<'a, H, D, MK> {
     fn new(
         keychain: &'a MK,
         messages_for_network: Sender<(
@@ -286,7 +286,7 @@ impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
     async fn rmc_alert(
         &mut self,
         forker: NodeIndex,
-        alert: Signed<'a, Alert<H, D, MK::Signature>, MK>,
+        alert: Signed<Alert<H, D, MK::Signature>, MK>,
     ) {
         let hash = alert.as_signable().hash();
         self.known_rmcs
@@ -383,7 +383,7 @@ impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
         }
     }
 
-    fn alert_confirmed(&mut self, multisigned: Multisigned<'a, H::Hash, MK>) {
+    fn alert_confirmed(&mut self, multisigned: Multisigned<H::Hash, MK>) {
         let alert = match self.known_alerts.get(multisigned.as_signable()) {
             Some(alert) => alert.as_signable(),
             None => {
@@ -478,7 +478,7 @@ impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
     }
 }
 
-pub(crate) async fn run<H: Hasher, D: Data, MK: MultiKeychain>(
+pub(crate) async fn run<H: Hasher, D: Data, MK: MultiKeychain + 'static>(
     keychain: MK,
     messages_for_network: Sender<(
         AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,

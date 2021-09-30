@@ -115,7 +115,7 @@ where
     session_id: SessionId,
     n_members: NodeCount,
     threshold: NodeCount,
-    store: UnitStore<'a, H, D, MK>,
+    store: UnitStore<H, D, MK>,
     keybox: &'a MK,
     alerts_for_alerter: Sender<Alert<H, D, MK::Signature>>,
     notifications_from_alerter: Receiver<ForkingNotification<H, D, MK::Signature>>,
@@ -257,7 +257,7 @@ where
     fn validate_unit(
         &self,
         uu: UncheckedSignedUnit<H, D, MK::Signature>,
-    ) -> Option<SignedUnit<'a, H, D, MK>> {
+    ) -> Option<SignedUnit<H, D, MK>> {
         let su = match uu.check(self.keybox) {
             Ok(su) => su,
             Err(uu) => {
@@ -287,7 +287,7 @@ where
         Some(su)
     }
 
-    fn add_unit_to_store_unless_fork(&mut self, su: SignedUnit<'a, H, D, MK>) {
+    fn add_unit_to_store_unless_fork(&mut self, su: SignedUnit<H, D, MK>) {
         let full_unit = su.as_signable();
         trace!(target: "AlephBFT-member", "{:?} Adding member unit to store {:?}", self.index(), full_unit);
         if self.store.is_forker(full_unit.creator()) {
@@ -822,7 +822,7 @@ pub(crate) async fn run<H, D, MK, DP, SH>(
 ) where
     H: Hasher,
     D: Data,
-    MK: MultiKeychain,
+    MK: MultiKeychain + 'static,
     DP: DataIO<D>,
     SH: SpawnHandle,
 {

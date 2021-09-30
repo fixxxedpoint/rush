@@ -5,13 +5,13 @@ use crate::{
 use async_trait::async_trait;
 use codec::{Decode, Encode, Error, Input, Output};
 use log::warn;
-use std::{fmt::Debug, marker::PhantomData};
+use std::fmt::Debug;
 /// The type used as a signature.
 ///
 /// The Signature typically does not contain the index of the node who signed the data.
-pub trait Signature: Debug + Clone + Encode + Decode + Send + Sync + Eq + 'static {}
+pub trait Signature: Debug + Clone + Encode + Decode + Send + Sync + Eq {}
 
-impl<T: Debug + Clone + Encode + Decode + Send + Sync + Eq + 'static> Signature for T {}
+impl<T: Debug + Clone + Encode + Decode + Send + Sync + Eq> Signature for T {}
 
 /// Abstraction of the signing data and verifying signatures.
 ///
@@ -21,7 +21,7 @@ impl<T: Debug + Clone + Encode + Decode + Send + Sync + Eq + 'static> Signature 
 /// and `verify(msg, s, j)` is to verify whether the signature s under the message msg is
 /// correct with respect to the public key of the jth node.
 #[async_trait]
-pub trait KeyBox: Index + Clone + Send + Sync + 'static {
+pub trait KeyBox: Index + Clone + Send + Sync {
     type Signature: Signature;
 
     /// Returns the total number of known public keys.
@@ -148,10 +148,7 @@ impl<T: Signable + Index, S: Signature> UncheckedSigned<T, S> {
         if !key_box.verify(self.signable.hash().as_ref(), &self.signature, index) {
             return Err(SignatureError { unchecked: self });
         }
-        Ok(Signed {
-            unchecked: self,
-            marker: PhantomData,
-        })
+        Ok(Signed { unchecked: self })
     }
 }
 
@@ -170,10 +167,7 @@ impl<T: Signable, S: PartialMultisignature> UncheckedSigned<T, S> {
         if !(keychain.is_complete(self.signable.hash().as_ref(), &self.signature)) {
             return Err(SignatureError { unchecked: self });
         }
-        Ok(Multisigned {
-            unchecked: self,
-            marker: PhantomData,
-        })
+        Ok(Multisigned { unchecked: self })
     }
 }
 
@@ -342,7 +336,6 @@ impl<T: Signable + Clone, MK: MultiKeychain> Clone for Multisigned<T, MK> {
     fn clone(&self) -> Self {
         Multisigned {
             unchecked: self.unchecked.clone(),
-            marker: self.marker,
         }
     }
 }
@@ -538,69 +531,114 @@ impl<KB: KeyBox> MultiKeychain for DefaultMultiKeychain<KB> {
     }
 }
 
-struct InvariantLifetime<'id>(PhantomData<*mut &'id ()>);
+pub(crate) mod owned_keybox {
+    use crate::{Index, KeyBox, MultiKeychain, NodeCount, NodeIndex, PartialMultisignature};
+    use codec::{Decode, Encode};
+    use std::marker::PhantomData;
 
-impl<'id> InvariantLifetime<'id> {
-    fn new() -> Self {
-        InvariantLifetime(PhantomData)
-    }
-}
+    #[derive(Eq, PartialEq, Debug, Decode, Encode)]
+    struct InvariantLifetime<'id>(PhantomData<fn(*mut &'id ()) -> ()>);
 
-pub(crate) struct Owned<'a, T> {
-    inner: T,
-    _marker: InvariantLifetime<'a>,
-}
-
-// TODO make Owned at least a functor
-impl<'a, T> Owned<'a, T> {
-    pub(crate) fn own<TT>(&self, value: TT) -> Owned<'a, TT> {
-        Owned {
-            inner: value,
-            _marker: InvariantLifetime::new(),
+    impl<'id> InvariantLifetime<'id> {
+        fn new() -> Self {
+            InvariantLifetime(PhantomData)
         }
     }
 
-    // // Applicative? nope - anything we created inside of a thread [parametrazed by 'id] needs to stay inside of it, e.g. MVar neeeds to be...
-    // pub(crate) fn apply<R>(self, f: Owned<'a, impl FnOnce(T) -> R>) -> Owned<'a, R> {}
+    impl<'id> Copy for InvariantLifetime<'id> {}
 
-    pub(crate) fn new<R>(value: T, f: impl for<'new_id> FnOnce(Owned<'new_id, T>) -> R) -> R {
-        let owned = Owned {
-            inner: value,
-            _marker: InvariantLifetime::new(),
-        };
-        f(owned)
-    }
-}
-
-// pub(crate) struct OwnedKeyBox<'id, KB: KeyBox> {
-//     keybox: KB,
-//     _marker: InvariantLifetime<'id>,
-// }
-
-pub(crate) struct OwnedKeyBox<'id, KB>(Owned<'id, KB>);
-
-impl<'id, KB> OwnedKeyBox<'id, KB> {
-    pub(crate) fn new<R>(
-        keybox: KB,
-        f: impl for<'new_id> FnOnce(OwnedKeyBox<'new_id, KB>) -> R,
-    ) -> R {
-    }
-}
-
-// TODO we can cheat a bit, and new can provide a closure for retrieving Owned::inner, but it shouldn't escape anywhere
-#[async_trait::async_trait]
-impl<'id, KB: KeyBox> KeyBox for OwnedKeyBox<'id, KB> {
-    type Signature = Owned<'id, KB::Signature>;
-
-    fn node_count(&self) -> NodeCount {
-        self.0.inner.node_count()
+    impl<'id> Clone for InvariantLifetime<'id> {
+        fn clone(&self) -> Self {
+            *self
+        }
     }
 
-    async fn sign(&self, msg: &[u8]) -> Self::Signature {
-        Owned::own(self.0.inner.sign(msg))
+    #[derive(Clone, Eq, PartialEq, Debug, Decode, Encode)]
+    pub(crate) struct Owned<'a, T> {
+        inner: T,
+        _marker: InvariantLifetime<'a>,
     }
 
-    fn verify(&self, msg: &[u8], sgn: &Self::Signature, index: NodeIndex) -> bool {
-        self.0.inner.verify(msg, sgn.inner, index)
+    impl<'a, T: Clone> Owned<'a, T> {
+        pub(crate) fn own<TT: Clone>(&self, value: TT) -> Owned<'a, TT> {
+            Owned {
+                inner: value,
+                _marker: InvariantLifetime::new(),
+            }
+        }
+
+        pub(crate) fn new<R>(value: T, f: impl for<'new_id> FnOnce(Owned<'new_id, T>) -> R) -> R {
+            let owned = Owned {
+                inner: value,
+                _marker: InvariantLifetime::new(),
+            };
+            f(owned)
+        }
+    }
+
+    // #[derive(Clone)]
+    // pub(crate) struct OwnedKeyBox<'id, KB>(Owned<'id, KB>);
+
+    // impl<'id, KB: Clone> OwnedKeyBox<'id, KB> {
+    //     pub(crate) fn new<R>(
+    //         keybox: KB,
+    //         f: impl for<'new_id> FnOnce(OwnedKeyBox<'new_id, KB>) -> R,
+    //     ) -> R {
+    //         Owned::new(keybox, |owned| {
+    //             let owned_keybox = OwnedKeyBox(owned);
+    //             f(owned_keybox)
+    //         })
+    //     }
+    // }
+
+    // TODO we can cheat a bit, and new can provide a closure for retrieving Owned::inner, but it shouldn't escape anywhere
+    #[async_trait::async_trait]
+    impl<'id, KB: KeyBox> KeyBox for Owned<'id, KB> {
+        type Signature = Owned<'id, KB::Signature>;
+
+        fn node_count(&self) -> NodeCount {
+            self.inner.node_count()
+        }
+
+        async fn sign(&self, msg: &[u8]) -> Self::Signature {
+            let signature = self.inner.sign(msg).await;
+            Owned::own(self, signature)
+        }
+
+        fn verify(&self, msg: &[u8], sgn: &Self::Signature, index: NodeIndex) -> bool {
+            self.inner.verify(msg, &sgn.inner, index)
+        }
+    }
+
+    impl<'id, KB: KeyBox> Index for Owned<'id, KB> {
+        fn index(&self) -> NodeIndex {
+            self.inner.index()
+        }
+    }
+
+    impl<'id, S: PartialMultisignature> PartialMultisignature for Owned<'id, S> {
+        type Signature = Owned<'id, S::Signature>;
+
+        fn add_signature(self, signature: &Self::Signature, index: NodeIndex) -> Self {
+            let phantom = Owned::own(signature, PhantomData as PhantomData<()>);
+            Owned::own(&phantom, self.inner.add_signature(&signature.inner, index))
+        }
+    }
+
+    impl<'id, KB: MultiKeychain> MultiKeychain for Owned<'id, KB> {
+        type PartialMultisignature = Owned<'id, KB::PartialMultisignature>;
+
+        fn from_signature(
+            &self,
+            signature: &Self::Signature,
+            index: NodeIndex,
+        ) -> Self::PartialMultisignature {
+            let partial_signature = self.inner.from_signature(&signature.inner, index);
+            Owned::own(self, partial_signature)
+        }
+
+        fn is_complete(&self, msg: &[u8], partial: &Self::PartialMultisignature) -> bool {
+            self.inner.is_complete(msg, &partial.inner)
+        }
     }
 }
