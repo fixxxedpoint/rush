@@ -554,7 +554,7 @@ pub(crate) mod owned_keybox {
     }
 
     #[derive(Clone, Eq, PartialEq, Debug, Decode, Encode)]
-    pub(crate) struct Owned<'a, T> {
+    pub struct Owned<'a, T> {
         inner: T,
         _marker: InvariantLifetime<'a>,
     }
@@ -573,6 +573,37 @@ pub(crate) mod owned_keybox {
                 _marker: InvariantLifetime::new(),
             };
             f(owned)
+        }
+
+        // TODO zamiast tego konwertuj Owned w jakis bezuzyteczny typ, i.e. NotOwned, ale spelniajacy wszystkie wymagania dla networka i nie posiadajacy zadnych lifetimeow
+        pub(crate) fn unsafe_into(self) -> T {
+            self.inner
+        }
+    }
+
+    impl<'a, T> From<NotOwned<T>> for Owned<'a, T> {
+        fn from(no: NotOwned<T>) -> Self {
+            Self {
+                inner: no.inner,
+                _marker: InvariantLifetime::new(),
+            }
+        }
+    }
+
+    impl<'a, T> From<Owned<'a, T>> for NotOwned<T> {
+        fn from(owned: Owned<'a, T>) -> Self {
+            Self { inner: owned.inner }
+        }
+    }
+
+    #[derive(Clone, Eq, PartialEq, Debug, Decode, Encode)]
+    pub struct NotOwned<T> {
+        inner: T,
+    }
+
+    impl<T> NotOwned<T> {
+        fn new(value: T) -> Self {
+            Self { inner: value }
         }
     }
 
@@ -613,6 +644,16 @@ pub(crate) mod owned_keybox {
     impl<'id, KB: KeyBox> Index for Owned<'id, KB> {
         fn index(&self) -> NodeIndex {
             self.inner.index()
+        }
+    }
+
+    // impl<T: Signature> Signature for NotOwned<T> {}
+
+    impl<S: PartialMultisignature> PartialMultisignature for NotOwned<S> {
+        type Signature = NotOwned<S::Signature>;
+
+        fn add_signature(self, signature: &Self::Signature, index: NodeIndex) -> Self {
+            NotOwned::new(self.inner.add_signature(&signature.inner, index))
         }
     }
 

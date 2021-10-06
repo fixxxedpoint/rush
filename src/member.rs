@@ -1,6 +1,8 @@
 use crate::{
+    alerts::AlertMessage,
     config::Config,
     network::{self, Recipient},
+    owned_keybox::{NotOwned, Owned},
     runway::{self, Request, Response, RunwayIO, RunwayNotificationIn, RunwayNotificationOut},
     signed::Signature,
     units::{UncheckedSignedUnit, UnitCoord},
@@ -11,7 +13,7 @@ use codec::{Decode, Encode};
 use futures::{
     channel::{mpsc, oneshot},
     future::FusedFuture,
-    pin_mut, FutureExt, StreamExt,
+    pin_mut, FutureExt, SinkExt, StreamExt,
 };
 use futures_timer::Delay;
 use log::{debug, error, info, trace, warn};
@@ -424,6 +426,29 @@ pub async fn run_session<
     H: Hasher,
     D: Data,
     DP: DataIO<D>,
+    N: Network<H, D, Into<MK::Signature>, NotOwned<MK::PartialMultisignature>> + 'static,
+    SH: SpawnHandle,
+    MK: MultiKeychain + 'static,
+>(
+    config: Config,
+    network: N,
+    data_io: DP,
+    keybox: MK,
+    spawn_handle: SH,
+    mut exit: oneshot::Receiver<()>,
+) {
+    Owned::new(keybox, move |owned_keybox| {
+        // run_session_inner::<H, D, DP, N, SH, Owned<'new_id, MK>>(
+        // TODO do this on the level of runway and map their Sender/Receiver?
+        run_session_inner(config, network, data_io, owned_keybox, spawn_handle, exit)
+    })
+    .await
+}
+
+async fn run_session_inner<
+    H: Hasher,
+    D: Data,
+    DP: DataIO<D>,
     N: Network<H, D, MK::Signature, MK::PartialMultisignature> + 'static,
     SH: SpawnHandle,
     MK: MultiKeychain + 'static,
@@ -467,8 +492,12 @@ pub async fn run_session<
     info!(target: "AlephBFT-member", "{:?} Initializing Runway.", index);
     let (runway_exit, exit_stream) = oneshot::channel();
     let runway_io = RunwayIO {
-        alert_messages_for_network,
-        alert_messages_from_network,
+        alert_messages_for_network: alert_messages_for_network.with(
+            |owned: AlertMessage<H, D, Owned<MK::Signature>, Owned<MK::PartialMultisignature>>| {
+                Result::Ok(owned.into())
+            },
+        ),
+        alert_messages_from_network: alert_messages_from_network.map(|not_owned| not_owned.into()),
         unit_messages_from_network: runway_messages_from_network,
         unit_messages_for_network: runway_messages_for_network,
         resolved_requests: resolved_requests_tx,
