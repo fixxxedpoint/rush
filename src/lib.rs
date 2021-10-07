@@ -54,6 +54,12 @@ pub trait Index {
     fn index(&self) -> NodeIndex;
 }
 
+impl<T: Index> Index for &T {
+    fn index(&self) -> NodeIndex {
+        (*self).index()
+    }
+}
+
 /// A hasher, used for creating identifiers for blocks or units.
 pub trait Hasher: Eq + Clone + Send + Sync + Debug + 'static {
     /// A hash, as an identifier for a block or unit.

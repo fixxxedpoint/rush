@@ -23,13 +23,20 @@ impl<T: Debug + Clone + Encode + Decode + Send + Sync + Eq> Signature for T {}
 #[async_trait]
 pub trait KeyBox: Index + Clone + Send + Sync {
     type Signature: Signature;
+    type OutsideSignature: Signature;
+    // type Signed: SignedT;
 
     /// Returns the total number of known public keys.
     fn node_count(&self) -> NodeCount;
     /// Signs a message `msg`.
-    async fn sign(&self, msg: &[u8]) -> Self::Signature;
+    async fn sign<T: AsRef<[u8]> + Index>(&self, msg: &T) -> Signed<&T, Self>;
     /// Verifies whether a node with `index` correctly signed the message `msg`.
-    fn verify(&self, msg: &[u8], sgn: &Self::Signature, index: NodeIndex) -> bool;
+    fn verify<T: AsRef<[u8]> + Index>(
+        &self,
+        msg: &T,
+        sgn: &Self::OutsideSignature,
+        index: NodeIndex,
+    ) -> Signed<&T, Self>;
 }
 
 /// A type to which signatures can be aggregated.
@@ -560,13 +567,6 @@ pub(crate) mod owned_keybox {
     }
 
     impl<'a, T: Clone> Owned<'a, T> {
-        pub(crate) fn own<TT: Clone>(&self, value: TT) -> Owned<'a, TT> {
-            Owned {
-                inner: value,
-                _marker: InvariantLifetime::new(),
-            }
-        }
-
         pub(crate) fn new<R>(value: T, f: impl for<'new_id> FnOnce(Owned<'new_id, T>) -> R) -> R {
             let owned = Owned {
                 inner: value,
@@ -606,21 +606,6 @@ pub(crate) mod owned_keybox {
             Self { inner: value }
         }
     }
-
-    // #[derive(Clone)]
-    // pub(crate) struct OwnedKeyBox<'id, KB>(Owned<'id, KB>);
-
-    // impl<'id, KB: Clone> OwnedKeyBox<'id, KB> {
-    //     pub(crate) fn new<R>(
-    //         keybox: KB,
-    //         f: impl for<'new_id> FnOnce(OwnedKeyBox<'new_id, KB>) -> R,
-    //     ) -> R {
-    //         Owned::new(keybox, |owned| {
-    //             let owned_keybox = OwnedKeyBox(owned);
-    //             f(owned_keybox)
-    //         })
-    //     }
-    // }
 
     // TODO we can cheat a bit, and new can provide a closure for retrieving Owned::inner, but it shouldn't escape anywhere
     #[async_trait::async_trait]

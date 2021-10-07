@@ -426,7 +426,7 @@ pub async fn run_session<
     H: Hasher,
     D: Data,
     DP: DataIO<D>,
-    N: Network<H, D, Into<MK::Signature>, NotOwned<MK::PartialMultisignature>> + 'static,
+    N: Network<H, D, MK::Signature, MK::PartialMultisignature> + 'static,
     SH: SpawnHandle,
     MK: MultiKeychain + 'static,
 >(
