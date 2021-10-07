@@ -13,6 +13,18 @@ pub trait Signature: Debug + Clone + Encode + Decode + Send + Sync + Eq {}
 
 impl<T: Debug + Clone + Encode + Decode + Send + Sync + Eq> Signature for T {}
 
+trait Plug<A> {
+    type Plugged;
+}
+
+trait SignedT<T: Signable, KB: KeyBox> {
+    fn as_signable(&self) -> &T;
+
+    fn signature(&self) -> &KB::Signature;
+
+    fn into_signable(self) -> (T, KB::Signature);
+}
+
 /// Abstraction of the signing data and verifying signatures.
 ///
 /// A typical implementation of KeyBox would be a collection of `N` public keys,
@@ -23,20 +35,26 @@ impl<T: Debug + Clone + Encode + Decode + Send + Sync + Eq> Signature for T {}
 #[async_trait]
 pub trait KeyBox: Index + Clone + Send + Sync {
     type Signature: Signature;
-    type OutsideSignature: Signature;
-    // type Signed: SignedT;
+    type Signed;
 
     /// Returns the total number of known public keys.
     fn node_count(&self) -> NodeCount;
     /// Signs a message `msg`.
-    async fn sign<T: AsRef<[u8]> + Index>(&self, msg: &T) -> Signed<&T, Self>;
+    async fn sign<T: AsRef<[u8]> + Clone>(&self, msg: T) -> <Self::Signed as Plug<T>>::Plugged
+    where
+        Self::Signed: Plug<T>,
+        <Self::Signed as Plug<T>>::Plugged: SignedT<T, Self>;
+
     /// Verifies whether a node with `index` correctly signed the message `msg`.
-    fn verify<T: AsRef<[u8]> + Index>(
+    async fn verify<T: AsRef<[u8]> + Clone>(
         &self,
-        msg: &T,
-        sgn: &Self::OutsideSignature,
+        msg: T,
+        sgn: &Self::Signature,
         index: NodeIndex,
-    ) -> Signed<&T, Self>;
+    ) -> <Self::Signed as Plug<T>>::Plugged
+    where
+        Self::Signed: Plug<T>,
+        <Self::Signed as Plug<T>>::Plugged: SignedT<T, Self>;
 }
 
 /// A type to which signatures can be aggregated.
@@ -501,6 +519,7 @@ impl<KB: KeyBox> Index for DefaultMultiKeychain<KB> {
 #[async_trait::async_trait]
 impl<KB: KeyBox> KeyBox for DefaultMultiKeychain<KB> {
     type Signature = KB::Signature;
+    type ExternalSignature = KB::ExternalSignature;
 
     async fn sign(&self, msg: &[u8]) -> Self::Signature {
         self.key_box.sign(msg).await
@@ -510,7 +529,7 @@ impl<KB: KeyBox> KeyBox for DefaultMultiKeychain<KB> {
         self.key_box.node_count()
     }
 
-    fn verify(&self, msg: &[u8], sgn: &Self::Signature, index: NodeIndex) -> bool {
+    fn verify(&self, msg: &[u8], sgn: &Self::ExternalSignature, index: NodeIndex) -> bool {
         self.key_box.verify(msg, sgn, index)
     }
 }
@@ -575,18 +594,16 @@ pub(crate) mod owned_keybox {
             f(owned)
         }
 
+        fn own<TT: Clone>(&self, value: TT) -> Owned<'a, TT> {
+            Owned {
+                inner: value,
+                _marker: InvariantLifetime::new(),
+            }
+        }
+
         // TODO zamiast tego konwertuj Owned w jakis bezuzyteczny typ, i.e. NotOwned, ale spelniajacy wszystkie wymagania dla networka i nie posiadajacy zadnych lifetimeow
         pub(crate) fn unsafe_into(self) -> T {
             self.inner
-        }
-    }
-
-    impl<'a, T> From<NotOwned<T>> for Owned<'a, T> {
-        fn from(no: NotOwned<T>) -> Self {
-            Self {
-                inner: no.inner,
-                _marker: InvariantLifetime::new(),
-            }
         }
     }
 
@@ -611,6 +628,7 @@ pub(crate) mod owned_keybox {
     #[async_trait::async_trait]
     impl<'id, KB: KeyBox> KeyBox for Owned<'id, KB> {
         type Signature = Owned<'id, KB::Signature>;
+        type ExternalSignature = KB::ExternalSignature;
 
         fn node_count(&self) -> NodeCount {
             self.inner.node_count()
@@ -621,8 +639,8 @@ pub(crate) mod owned_keybox {
             Owned::own(self, signature)
         }
 
-        fn verify(&self, msg: &[u8], sgn: &Self::Signature, index: NodeIndex) -> bool {
-            self.inner.verify(msg, &sgn.inner, index)
+        fn verify(&self, msg: &[u8], sgn: &Self::ExternalSignature, index: NodeIndex) -> bool {
+            self.inner.verify(msg, sgn, index)
         }
     }
 
@@ -631,8 +649,6 @@ pub(crate) mod owned_keybox {
             self.inner.index()
         }
     }
-
-    // impl<T: Signature> Signature for NotOwned<T> {}
 
     impl<S: PartialMultisignature> PartialMultisignature for NotOwned<S> {
         type Signature = NotOwned<S::Signature>;
