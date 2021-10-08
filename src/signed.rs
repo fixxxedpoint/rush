@@ -13,6 +13,8 @@ pub trait Signature: Debug + Clone + Encode + Decode + Send + Sync + Eq {}
 
 impl<T: Debug + Clone + Encode + Decode + Send + Sync + Eq> Signature for T {}
 
+struct for_all;
+
 trait Plug<A> {
     type Plugged;
 }
@@ -33,25 +35,27 @@ trait SignedT<T: Signable, KB: KeyBox> {
 /// and `verify(msg, s, j)` is to verify whether the signature s under the message msg is
 /// correct with respect to the public key of the jth node.
 #[async_trait]
-pub trait KeyBox: Index + Clone + Send + Sync {
+pub trait KeyBox<T>: Index + Clone + Send + Sync {
     type Signature: Signature;
     type Signed;
+    type Error;
 
     /// Returns the total number of known public keys.
     fn node_count(&self) -> NodeCount;
+
     /// Signs a message `msg`.
-    async fn sign<T: AsRef<[u8]> + Clone>(&self, msg: T) -> <Self::Signed as Plug<T>>::Plugged
+    async fn sign(&self, msg: T) -> <Self::Signed as Plug<T>>::Plugged
     where
         Self::Signed: Plug<T>,
         <Self::Signed as Plug<T>>::Plugged: SignedT<T, Self>;
 
     /// Verifies whether a node with `index` correctly signed the message `msg`.
-    async fn verify<T: AsRef<[u8]> + Clone>(
+    async fn verify(
         &self,
         msg: T,
         sgn: &Self::Signature,
         index: NodeIndex,
-    ) -> <Self::Signed as Plug<T>>::Plugged
+    ) -> Result<<Self::Signed as Plug<T>>::Plugged, Self::Error>
     where
         Self::Signed: Plug<T>,
         <Self::Signed as Plug<T>>::Plugged: SignedT<T, Self>;
@@ -215,10 +219,13 @@ impl<T: Signable, S: Signature> From<UncheckedSigned<Indexed<T>, S>> for Uncheck
 ///
 /// The correctness is guaranteed by storing a (phantom) reference to the `KeyBox` that verified
 /// the signature.
-// TODO remove that 'a from here
 #[derive(Debug)]
 pub struct Signed<T: Signable + Index, KB: KeyBox> {
     unchecked: UncheckedSigned<T, KB::Signature>,
+}
+
+impl<T: Signable + Index, KB: KeyBox, A: Signable + Index> Plug<A> for Signed<T, KB> {
+    type Plugged = Signed<A, KB>;
 }
 
 impl<T: Signable + Clone + Index, KB: KeyBox> Clone for Signed<T, KB> {
@@ -519,9 +526,13 @@ impl<KB: KeyBox> Index for DefaultMultiKeychain<KB> {
 #[async_trait::async_trait]
 impl<KB: KeyBox> KeyBox for DefaultMultiKeychain<KB> {
     type Signature = KB::Signature;
-    type ExternalSignature = KB::ExternalSignature;
+    type Signed = KB::Signed;
 
-    async fn sign(&self, msg: &[u8]) -> Self::Signature {
+    async fn sign<T: AsRef<[u8]> + Clone>(&self, msg: T) -> <Self::Signed as Plug<T>>::Plugged
+    where
+        Self::Signed: Plug<T>,
+        <Self::Signed as Plug<T>>::Plugged: SignedT<T, Self>,
+    {
         self.key_box.sign(msg).await
     }
 
@@ -529,12 +540,21 @@ impl<KB: KeyBox> KeyBox for DefaultMultiKeychain<KB> {
         self.key_box.node_count()
     }
 
-    fn verify(&self, msg: &[u8], sgn: &Self::ExternalSignature, index: NodeIndex) -> bool {
+    async fn verify<T: AsRef<[u8]> + Clone>(
+        &self,
+        msg: T,
+        sgn: &Self::Signature,
+        index: NodeIndex,
+    ) -> <Self::Signed as Plug<T>>::Plugged
+    where
+        Self::Signed: Plug<T>,
+        <Self::Signed as Plug<T>>::Plugged: SignedT<T, Self>,
+    {
         self.key_box.verify(msg, sgn, index)
     }
 }
 
-impl<KB: KeyBox> MultiKeychain for DefaultMultiKeychain<KB> {
+impl<T, KB: KeyBox<T>> MultiKeychain for DefaultMultiKeychain<KB> {
     type PartialMultisignature = SignatureSet<KB::Signature>;
 
     fn from_signature(
@@ -628,7 +648,6 @@ pub(crate) mod owned_keybox {
     #[async_trait::async_trait]
     impl<'id, KB: KeyBox> KeyBox for Owned<'id, KB> {
         type Signature = Owned<'id, KB::Signature>;
-        type ExternalSignature = KB::ExternalSignature;
 
         fn node_count(&self) -> NodeCount {
             self.inner.node_count()
