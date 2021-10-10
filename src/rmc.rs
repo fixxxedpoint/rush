@@ -42,8 +42,8 @@ impl<H: Signable, S: Signature, M: PartialMultisignature> Message<H, S, M> {
 
 /// A task of brodcasting a message.
 #[derive(Clone)]
-pub enum Task<H: Signable, MK: MultiKeychain> {
-    BroadcastMessage(Message<H, MK::Signature, MK::PartialMultisignature>),
+pub enum Task<H: Signable, S: Signature, PM: PartialMultisignature> {
+    BroadcastMessage(Message<H, S, PM>),
 }
 
 /// Abstraction of a task-scheduling logic

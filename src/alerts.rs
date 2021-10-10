@@ -136,7 +136,13 @@ pub(crate) enum ForkingNotification<H: Hasher, D: Data, S: Signature> {
 /// https://cardinal-cryptography.github.io/AlephBFT/how_alephbft_does_it.html Section 2.5 and
 /// https://cardinal-cryptography.github.io/AlephBFT/reliable_broadcast.html and to the Aleph
 /// paper https://arxiv.org/abs/1908.05156 Appendix A1 for a discussion.
-struct Alerter<'a, H: Hasher, D: Data, MK: MultiKeychain> {
+struct Alerter<
+    'a,
+    H: Hasher,
+    D: Data,
+    S: Signature,
+    MK: MultiKeychain<UncheckedSignedUnit<H, D, S>, Signature = S>,
+> {
     session_id: SessionId,
     keychain: &'a MK,
     messages_for_network: Sender<(
@@ -160,7 +166,14 @@ pub(crate) struct AlertConfig {
     pub session_id: SessionId,
 }
 
-impl<'a, H: Hasher, D: Data, MK: MultiKeychain + 'static> Alerter<'a, H, D, MK> {
+impl<
+        'a,
+        H: Hasher,
+        D: Data,
+        S: Signature,
+        MK: MultiKeychain<UncheckedSignedUnit<H, D, S>, Signature = S> + 'static,
+    > Alerter<'a, H, D, S, MK>
+{
     fn new(
         keychain: &'a MK,
         messages_for_network: Sender<(
@@ -478,7 +491,12 @@ impl<'a, H: Hasher, D: Data, MK: MultiKeychain + 'static> Alerter<'a, H, D, MK> 
     }
 }
 
-pub(crate) async fn run<H: Hasher, D: Data, MK: MultiKeychain + 'static>(
+pub(crate) async fn run<
+    H: Hasher,
+    D: Data,
+    S: Signature,
+    MK: MultiKeychain<UncheckedSignedUnit<H, D, S>, Signature = S> + 'static,
+>(
     keychain: MK,
     messages_for_network: Sender<(
         AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,

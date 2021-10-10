@@ -2,7 +2,7 @@ use crate::{
     alerts::AlertMessage,
     config::Config,
     network::{self, Recipient},
-    owned_keybox::{NotOwned, Owned},
+    owned_keybox::Owned,
     runway::{self, Request, Response, RunwayIO, RunwayNotificationIn, RunwayNotificationOut},
     signed::Signature,
     units::{UncheckedSignedUnit, UnitCoord},
