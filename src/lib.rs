@@ -3,7 +3,10 @@
 //! gives appropriate access to the set of available data that we need to make consensus on.
 
 use codec::{Decode, Encode};
-use futures::{channel::mpsc, Future};
+use futures::future::FusedFuture;
+use futures::stream::Stream;
+use futures::Future;
+use futures::Sink;
 use std::{fmt::Debug, hash::Hash as StdHash, pin::Pin};
 
 use crate::nodes::NodeMap;
@@ -99,5 +102,20 @@ pub trait SpawnHandle: Clone + Send + 'static {
     ) -> TaskHandle;
 }
 
-pub(crate) type Receiver<T> = mpsc::UnboundedReceiver<T>;
-pub(crate) type Sender<T> = mpsc::UnboundedSender<T>;
+pub(crate) trait Receiver<T>: Stream<Item = T> {}
+pub(crate) trait Sender<T>: Sink<T> {}
+
+pub trait HigherReceiver<T> {
+    type Receiver: Receiver<T>;
+}
+
+pub trait HigherSender<T> {
+    type Sender: Sender<T>;
+}
+
+pub trait HigherOneShot<T> {
+    type OneShot: FusedFuture<Output = T>;
+}
+
+type ToReceiver<R, T> = <R as HigherReceiver<T>>::Receiver;
+type ToSender<R, T> = <R as HigherSender<T>>::Sender;
