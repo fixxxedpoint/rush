@@ -11,17 +11,20 @@ use crate::{
     extender::Extender,
     runway::{NotificationIn, NotificationOut},
     terminal::Terminal,
-    Hasher, OrderedBatch, Receiver, Round, Sender, SpawnHandle,
+    Hasher, OrderedBatch, Round, SpawnHandle, ToOneShotReceiver, ToReceiver, ToSender, CP5,
 };
 
-pub(crate) async fn run<H: Hasher + 'static>(
+pub(crate) async fn run<
+    H: Hasher + 'static,
+    CH: CP5<NotificationIn<H>, NotificationOut<H>, OrderedBatch<H::Hash>, Round, ()>,
+>(
     conf: Config,
-    incoming_notifications: Receiver<NotificationIn<H>>,
-    outgoing_notifications: Sender<NotificationOut<H>>,
-    ordered_batch_tx: Sender<OrderedBatch<H::Hash>>,
+    incoming_notifications: ToReceiver<CH, NotificationIn<H>>,
+    outgoing_notifications: ToSender<CH, NotificationOut<H>>,
+    ordered_batch_tx: ToSender<CH, OrderedBatch<H::Hash>>,
     spawn_handle: impl SpawnHandle,
-    starting_round: oneshot::Receiver<Round>,
-    mut exit: oneshot::Receiver<()>,
+    starting_round: ToOneShotReceiver<CH, Round>,
+    mut exit: ToOneShotReceiver<CH, ()>,
 ) {
     info!(target: "AlephBFT", "{:?} Starting all services...", conf.node_ix);
 

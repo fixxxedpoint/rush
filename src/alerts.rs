@@ -5,7 +5,8 @@ use crate::{
     rmc::{DoublingDelayScheduler, ReliableMulticast},
     signed::{Multisigned, PartialMultisignature, Signable, Signature, Signed, UncheckedSigned},
     units::UncheckedSignedUnit,
-    Data, Hasher, Index, MultiKeychain, NodeIndex, Receiver, Sender, SessionId,
+    Data, Hasher, Index, MultiKeychain, NodeIndex, SessionId, ToOneShotReceiver, ToReceiver,
+    ToSender, CP,
 };
 use codec::{Decode, Encode};
 use derivative::Derivative;
@@ -136,22 +137,39 @@ pub(crate) enum ForkingNotification<H: Hasher, D: Data, S: Signature> {
 /// https://cardinal-cryptography.github.io/AlephBFT/how_alephbft_does_it.html Section 2.5 and
 /// https://cardinal-cryptography.github.io/AlephBFT/reliable_broadcast.html and to the Aleph
 /// paper https://arxiv.org/abs/1908.05156 Appendix A1 for a discussion.
-struct Alerter<'a, H: Hasher, D: Data, MK: MultiKeychain> {
+struct Alerter<
+    'a,
+    H: Hasher,
+    D: Data,
+    MK: MultiKeychain,
+    CH: CP<AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>>
+        + CP<ForkingNotification<H, D, MK::Signature>>
+        + CP<(
+            AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
+            Recipient,
+        )> + CP<Alert<H, D, MK::Signature>>
+        + CP<rmc::Message<H::Hash, MK::Signature, MK::PartialMultisignature>>,
+> {
     session_id: SessionId,
     keychain: &'a MK,
-    messages_for_network: Sender<(
-        AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
-        Recipient,
-    )>,
-    messages_from_network: Receiver<AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>>,
-    notifications_for_units: Sender<ForkingNotification<H, D, MK::Signature>>,
-    alerts_from_units: Receiver<Alert<H, D, MK::Signature>>,
+    messages_for_network: ToSender<
+        CH,
+        (
+            AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
+            Recipient,
+        ),
+    >,
+    messages_from_network:
+        ToReceiver<CH, AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>>,
+    notifications_for_units: ToSender<CH, ForkingNotification<H, D, MK::Signature>>,
+    alerts_from_units: ToReceiver<CH, Alert<H, D, MK::Signature>>,
     known_forkers: HashMap<NodeIndex, ForkProof<H, D, MK::Signature>>,
     known_alerts: HashMap<H::Hash, Signed<'a, Alert<H, D, MK::Signature>, MK>>,
     known_rmcs: HashMap<(NodeIndex, NodeIndex), H::Hash>,
     rmc: ReliableMulticast<'a, H::Hash, MK>,
-    messages_from_rmc: Receiver<rmc::Message<H::Hash, MK::Signature, MK::PartialMultisignature>>,
-    messages_for_rmc: Sender<rmc::Message<H::Hash, MK::Signature, MK::PartialMultisignature>>,
+    messages_from_rmc:
+        ToReceiver<CH, rmc::Message<H::Hash, MK::Signature, MK::PartialMultisignature>>,
+    messages_for_rmc: ToSender<CH, rmc::Message<H::Hash, MK::Signature, MK::PartialMultisignature>>,
     exiting: bool,
 }
 
@@ -160,18 +178,35 @@ pub(crate) struct AlertConfig {
     pub session_id: SessionId,
 }
 
-impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
+impl<
+        'a,
+        H: Hasher,
+        D: Data,
+        MK: MultiKeychain,
+        CH: CP<AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>>
+            + CP<ForkingNotification<H, D, MK::Signature>>
+            + CP<(
+                AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
+                Recipient,
+            )> + CP<Alert<H, D, MK::Signature>>
+            + CP<rmc::Message<H::Hash, MK::Signature, MK::PartialMultisignature>>,
+    > Alerter<'a, H, D, MK, CH>
+{
     fn new(
         keychain: &'a MK,
-        messages_for_network: Sender<(
-            AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
-            Recipient,
-        )>,
-        messages_from_network: Receiver<
+        messages_for_network: ToSender<
+            CH,
+            (
+                AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
+                Recipient,
+            ),
+        >,
+        messages_from_network: ToReceiver<
+            CH,
             AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
         >,
-        notifications_for_units: Sender<ForkingNotification<H, D, MK::Signature>>,
-        alerts_from_units: Receiver<Alert<H, D, MK::Signature>>,
+        notifications_for_units: ToSender<CH, ForkingNotification<H, D, MK::Signature>>,
+        alerts_from_units: ToReceiver<CH, Alert<H, D, MK::Signature>>,
         config: AlertConfig,
     ) -> Self {
         let (messages_for_rmc, messages_from_us) = mpsc::unbounded();
@@ -478,17 +513,34 @@ impl<'a, H: Hasher, D: Data, MK: MultiKeychain> Alerter<'a, H, D, MK> {
     }
 }
 
-pub(crate) async fn run<H: Hasher, D: Data, MK: MultiKeychain>(
+pub(crate) async fn run<
+    H: Hasher,
+    D: Data,
+    MK: MultiKeychain,
+    CH: CP<(
+            AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
+            Recipient,
+        )> + CP<AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>>
+        + CP<ForkingNotification<H, D, MK::Signature>>
+        + CP<Alert<H, D, MK::Signature>>
+        + CP<()>,
+>(
     keychain: MK,
-    messages_for_network: Sender<(
+    messages_for_network: ToSender<
+        CH,
+        (
+            AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
+            Recipient,
+        ),
+    >,
+    messages_from_network: ToReceiver<
+        CH,
         AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
-        Recipient,
-    )>,
-    messages_from_network: Receiver<AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>>,
-    notifications_for_units: Sender<ForkingNotification<H, D, MK::Signature>>,
-    alerts_from_units: Receiver<Alert<H, D, MK::Signature>>,
+    >,
+    notifications_for_units: ToSender<CH, ForkingNotification<H, D, MK::Signature>>,
+    alerts_from_units: ToReceiver<CH, Alert<H, D, MK::Signature>>,
     config: AlertConfig,
-    exit: oneshot::Receiver<()>,
+    exit: ToOneShotReceiver<CH, ()>,
 ) {
     Alerter::new(
         &keychain,

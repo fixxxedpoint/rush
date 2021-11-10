@@ -9,8 +9,9 @@ use crate::{
     units::{
         ControlHash, FullUnit, PreUnit, SignedUnit, UncheckedSignedUnit, Unit, UnitCoord, UnitStore,
     },
-    Config, Data, DataIO, Hasher, Index, MultiKeychain, NodeCount, NodeIndex, OrderedBatch,
-    Receiver, Round, Sender, SessionId, Signature, Signed, SpawnHandle, UncheckedSigned,
+    Config, Data, DataIO, Hasher, Index, MultiKeychain, NodeCount, NodeIndex, OrderedBatch, Round,
+    SessionId, Signature, Signed, SpawnHandle, ToOneShotReceiver, ToOneShotSender, ToReceiver,
+    ToSender, UncheckedSigned,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -102,7 +103,7 @@ impl<H: Hasher, D: Data, S: Signature> TryFrom<UnitMessage<H, D, S>>
     }
 }
 
-struct Runway<'a, H, D, MK, DP>
+struct Runway<'a, H, D, MK, DP, CH>
 where
     H: Hasher,
     D: Data,
@@ -117,50 +118,50 @@ where
     threshold: NodeCount,
     store: UnitStore<'a, H, D, MK>,
     keybox: &'a MK,
-    alerts_for_alerter: Sender<Alert<H, D, MK::Signature>>,
-    notifications_from_alerter: Receiver<ForkingNotification<H, D, MK::Signature>>,
-    unit_messages_from_network: Receiver<RunwayNotificationIn<H, D, MK::Signature>>,
-    unit_messages_for_network: Sender<RunwayNotificationOut<H, D, MK::Signature>>,
-    resolved_requests: Sender<Request<H>>,
-    tx_consensus: Sender<NotificationIn<H>>,
-    rx_consensus: Receiver<NotificationOut<H>>,
-    ordered_batch_rx: Receiver<Vec<H::Hash>>,
+    alerts_for_alerter: ToSender<CH, Alert<H, D, MK::Signature>>,
+    notifications_from_alerter: ToReceiver<CH, ForkingNotification<H, D, MK::Signature>>,
+    unit_messages_from_network: ToReceiver<CH, RunwayNotificationIn<H, D, MK::Signature>>,
+    unit_messages_for_network: ToSender<CH, RunwayNotificationOut<H, D, MK::Signature>>,
+    resolved_requests: ToSender<CH, Request<H>>,
+    tx_consensus: ToSender<CH, NotificationIn<H>>,
+    rx_consensus: ToReceiver<CH, NotificationOut<H>>,
+    ordered_batch_rx: ToReceiver<CH, Vec<H::Hash>>,
     data_io: DP,
     after_catch_up_delay: bool,
-    starting_round_sender: Option<oneshot::Sender<Round>>,
+    starting_round_sender: Option<ToOneShotSender<CH, Round>>,
     starting_round_value: Round,
     newest_unit_responders: HashSet<NodeIndex>,
     salt: u64,
     exiting: bool,
 }
 
-struct RunwayConfig<'a, H: Hasher, D: Data, DP: DataIO<D>, MK: MultiKeychain> {
+struct RunwayConfig<'a, H: Hasher, D: Data, DP: DataIO<D>, MK: MultiKeychain, CH> {
     node_ix: NodeIndex,
     session_id: SessionId,
     n_members: NodeCount,
     max_round: Round,
     keychain: &'a MK,
     data_io: DP,
-    alerts_for_alerter: Sender<Alert<H, D, MK::Signature>>,
-    notifications_from_alerter: Receiver<ForkingNotification<H, D, MK::Signature>>,
-    tx_consensus: Sender<NotificationIn<H>>,
-    rx_consensus: Receiver<NotificationOut<H>>,
-    unit_messages_from_network: Receiver<RunwayNotificationIn<H, D, MK::Signature>>,
-    unit_messages_for_network: Sender<RunwayNotificationOut<H, D, MK::Signature>>,
-    ordered_batch_rx: Receiver<Vec<H::Hash>>,
-    resolved_requests: Sender<Request<H>>,
-    starting_round_sender: oneshot::Sender<Round>,
+    alerts_for_alerter: ToSender<CH, Alert<H, D, MK::Signature>>,
+    notifications_from_alerter: ToReceiver<CH, ForkingNotification<H, D, MK::Signature>>,
+    tx_consensus: ToSender<CH, NotificationIn<H>>,
+    rx_consensus: ToReceiver<CH, NotificationOut<H>>,
+    unit_messages_from_network: ToReceiver<CH, RunwayNotificationIn<H, D, MK::Signature>>,
+    unit_messages_for_network: ToSender<CH, RunwayNotificationOut<H, D, MK::Signature>>,
+    ordered_batch_rx: ToReceiver<CH, Vec<H::Hash>>,
+    resolved_requests: ToSender<CH, Request<H>>,
+    starting_round_sender: ToOneShotSender<CH, Round>,
     salt: u64,
 }
 
-impl<'a, H, D, MK, DP> Runway<'a, H, D, MK, DP>
+impl<'a, H, D, MK, DP, CH> Runway<'a, H, D, MK, DP, CH>
 where
     H: Hasher,
     D: Data,
     MK: MultiKeychain,
     DP: DataIO<D>,
 {
-    fn new(config: RunwayConfig<'a, H, D, DP, MK>) -> Self {
+    fn new(config: RunwayConfig<'a, H, D, DP, MK, CH>) -> Self {
         let n_members = config.n_members;
         let threshold = (n_members * 2) / 3 + NodeCount(1);
         let max_round = config.max_round;
@@ -725,7 +726,7 @@ where
         self.send_consensus_notification(NotificationIn::NewUnits(units_to_move))
     }
 
-    async fn run(mut self, mut exit: oneshot::Receiver<()>) {
+    async fn run(mut self, mut exit: ToOneShotReceiver<CH, ()>) {
         let index = self.index();
 
         info!(target: "AlephBFT-runway", "{:?} Runway starting.", index);
@@ -800,25 +801,29 @@ where
     }
 }
 
-pub(crate) struct RunwayIO<H: Hasher, D: Data, MK: MultiKeychain> {
-    pub(crate) alert_messages_for_network: Sender<(
-        AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
-        Recipient,
-    )>,
+pub(crate) struct RunwayIO<H: Hasher, D: Data, MK: MultiKeychain, CH> {
+    pub(crate) alert_messages_for_network: ToSender<
+        CH,
+        (
+            AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
+            Recipient,
+        ),
+    >,
     pub(crate) alert_messages_from_network:
-        Receiver<AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>>,
-    pub(crate) unit_messages_for_network: Sender<RunwayNotificationOut<H, D, MK::Signature>>,
-    pub(crate) unit_messages_from_network: Receiver<RunwayNotificationIn<H, D, MK::Signature>>,
-    pub(crate) resolved_requests: Sender<Request<H>>,
+        ToReceiver<CH, AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>>,
+    pub(crate) unit_messages_for_network: ToSender<CH, RunwayNotificationOut<H, D, MK::Signature>>,
+    pub(crate) unit_messages_from_network:
+        ToReceiver<CH, RunwayNotificationIn<H, D, MK::Signature>>,
+    pub(crate) resolved_requests: ToSender<CH, Request<H>>,
 }
 
-pub(crate) async fn run<H, D, MK, DP, SH>(
+pub(crate) async fn run<H, D, MK, DP, SH, CH>(
     config: Config,
     keychain: MK,
     data_io: DP,
     spawn_handle: SH,
-    runway_io: RunwayIO<H, D, MK>,
-    mut exit: oneshot::Receiver<()>,
+    runway_io: RunwayIO<H, D, MK, CH>,
+    mut exit: ToOneShotReceiver<CH, ()>,
 ) where
     H: Hasher,
     D: Data,

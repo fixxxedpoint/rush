@@ -1,4 +1,4 @@
-use futures::{channel::oneshot, StreamExt};
+use futures::StreamExt;
 use std::collections::{hash_map::Entry, HashMap, VecDeque};
 
 use crate::{
@@ -6,7 +6,7 @@ use crate::{
     nodes::{NodeCount, NodeIndex, NodeMap},
     runway::{NotificationIn, NotificationOut},
     units::{ControlHash, Unit, UnitCoord},
-    Hasher, Receiver, Round, Sender,
+    Hasher, Round, ToOneShotReceiver, ToReceiver, ToSender, CP,
 };
 use log::{debug, info, trace, warn};
 
@@ -102,12 +102,12 @@ type SyncClosure<X, Y> = Box<dyn Fn(X) -> Y + Sync + Send + 'static>;
 /// We also refer to the documentation https://cardinal-cryptography.github.io/AlephBFT/internals.html
 /// Section 5.3 for a discussion of this component.
 
-pub(crate) struct Terminal<H: Hasher> {
+pub(crate) struct Terminal<H: Hasher, CH: CP<NotificationIn<H>> + CP<NotificationOut<H>>> {
     node_id: NodeIndex,
     // A channel for receiving notifications (units mainly)
-    ntfct_rx: Receiver<NotificationIn<H>>,
+    ntfct_rx: ToReceiver<CH, NotificationIn<H>>,
     // A channel to push outgoing notifications
-    ntfct_tx: Sender<NotificationOut<H>>,
+    ntfct_tx: ToSender<CH, NotificationOut<H>>,
     // A Queue to handle events happening in the Terminal. The reason of this being a queue is because
     // some events trigger other events and because of the Dag structure, these should be handled
     // in a FIFO order (as in BFS) and not recursively (as in DFS).
@@ -128,11 +128,11 @@ pub(crate) struct Terminal<H: Hasher> {
     exiting: bool,
 }
 
-impl<H: Hasher> Terminal<H> {
+impl<H: Hasher, CH: CP<NotificationIn<H>> + CP<NotificationOut<H>>> Terminal<H, CH> {
     pub(crate) fn new(
         node_id: NodeIndex,
-        ntfct_rx: Receiver<NotificationIn<H>>,
-        ntfct_tx: Sender<NotificationOut<H>>,
+        ntfct_rx: ToReceiver<CH, NotificationIn<H>>,
+        ntfct_tx: ToSender<CH, NotificationOut<H>>,
     ) -> Self {
         Terminal {
             node_id,
@@ -349,7 +349,7 @@ impl<H: Hasher> Terminal<H> {
         }
     }
 
-    pub(crate) async fn run(&mut self, mut exit: oneshot::Receiver<()>) {
+    pub(crate) async fn run(&mut self, mut exit: ToOneShotReceiver<CH, ()>) {
         loop {
             futures::select! {
                 n = self.ntfct_rx.next() => {

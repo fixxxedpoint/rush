@@ -3,8 +3,7 @@ use crate::{
     member::UnitMessage,
     nodes::NodeIndex,
     signed::{PartialMultisignature, Signature},
-    Data, Hasher, HigherOneShot, HigherReceiver, HigherSender, Receiver, Sender, ToReceiver,
-    ToSender,
+    Data, Hasher, ToOneShotReceiver, ToReceiver, ToSender, CP4, CP5,
 };
 use codec::{Decode, Encode};
 use futures::{channel::oneshot, FutureExt, StreamExt};
@@ -118,10 +117,12 @@ struct NetworkHub<
     N: Network<H, D, S, MS>,
     CH,
 > where
-    CH: HigherReceiver<(UnitMessage<H, D, S>, Recipient)>
-        + HigherSender<UnitMessage<H, D, S>>
-        + HigherReceiver<(AlertMessage<H, D, S, MS>, Recipient)>
-        + HigherSender<AlertMessage<H, D, S, MS>>,
+    CH: CP4<
+        (UnitMessage<H, D, S>, Recipient),
+        UnitMessage<H, D, S>,
+        (AlertMessage<H, D, S, MS>, Recipient),
+        AlertMessage<H, D, S, MS>,
+    >,
 {
     network: N,
     units_to_send: ToReceiver<CH, (UnitMessage<H, D, S>, Recipient)>,
@@ -130,15 +131,22 @@ struct NetworkHub<
     alerts_received: ToSender<CH, AlertMessage<H, D, S, MS>>,
 }
 
-impl<H: Hasher, D: Data, S: Signature, MS: PartialMultisignature, N: Network<H, D, S, MS>>
-    NetworkHub<H, D, S, MS, N>
+impl<H: Hasher, D: Data, S: Signature, MS: PartialMultisignature, N: Network<H, D, S, MS>, CH>
+    NetworkHub<H, D, S, MS, N, CH>
+where
+    CH: CP4<
+        (UnitMessage<H, D, S>, Recipient),
+        UnitMessage<H, D, S>,
+        (AlertMessage<H, D, S, MS>, Recipient),
+        AlertMessage<H, D, S, MS>,
+    >,
 {
     fn new(
         network: N,
-        units_to_send: Receiver<(UnitMessage<H, D, S>, Recipient)>,
-        units_received: Sender<UnitMessage<H, D, S>>,
-        alerts_to_send: Receiver<(AlertMessage<H, D, S, MS>, Recipient)>,
-        alerts_received: Sender<AlertMessage<H, D, S, MS>>,
+        units_to_send: ToReceiver<CH, (UnitMessage<H, D, S>, Recipient)>,
+        units_received: ToSender<CH, UnitMessage<H, D, S>>,
+        alerts_to_send: ToReceiver<CH, (AlertMessage<H, D, S, MS>, Recipient)>,
+        alerts_received: ToSender<CH, AlertMessage<H, D, S, MS>>,
     ) -> Self {
         NetworkHub {
             network,
@@ -212,17 +220,19 @@ pub(crate) async fn run<
     CH,
 >(
     network: N,
-    units_to_send: <CH as HigherReceiver<(UnitMessage<H, D, S>, Recipient)>>::Receiver,
-    units_received: <CH as HigherSender<UnitMessage<H, D, S>>>::Sender,
-    alerts_to_send: <CH as HigherReceiver<(AlertMessage<H, D, S, MS>, Recipient)>>::Receiver,
-    alerts_received: <CH as HigherSender<AlertMessage<H, D, S, MS>>>::Sender,
-    exit: <CH as HigherOneShot<()>>::OneShot,
+    units_to_send: ToReceiver<CH, (UnitMessage<H, D, S>, Recipient)>,
+    units_received: ToSender<CH, UnitMessage<H, D, S>>,
+    alerts_to_send: ToReceiver<CH, (AlertMessage<H, D, S, MS>, Recipient)>,
+    alerts_received: ToSender<CH, AlertMessage<H, D, S, MS>>,
+    exit: ToOneShotReceiver<CH, ()>,
 ) where
-    CH: HigherSender<UnitMessage<H, D, S>>
-        + HigherReceiver<(UnitMessage<H, D, S>, Recipient)>
-        + HigherReceiver<(AlertMessage<H, D, S, MS>, Recipient)>
-        + HigherSender<AlertMessage<H, D, S, MS>>
-        + HigherOneShot<()>,
+    CH: CP5<
+        (UnitMessage<H, D, S>, Recipient),
+        UnitMessage<H, D, S>,
+        (AlertMessage<H, D, S, MS>, Recipient),
+        AlertMessage<H, D, S, MS>,
+        (),
+    >,
 {
     NetworkHub::new(
         network,

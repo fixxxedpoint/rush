@@ -3,7 +3,7 @@ use crate::{
     nodes::{NodeCount, NodeIndex},
     runway::NotificationOut,
     units::{PreUnit, Unit},
-    Hasher, Receiver, Round, Sender,
+    Hasher, Round, ToReceiver, ToSender, CP2,
 };
 use futures::{channel::oneshot, FutureExt, StreamExt};
 use futures_timer::Delay;
@@ -33,17 +33,17 @@ impl From<GeneralConfig> for Config {
     }
 }
 
-pub struct IO<H: Hasher> {
-    pub(crate) incoming_parents: Receiver<Unit<H>>,
-    pub(crate) outgoing_units: Sender<NotificationOut<H>>,
+pub struct IO<H: Hasher, CH: CP2<Unit<H>, NotificationOut<H>>> {
+    pub(crate) incoming_parents: ToReceiver<CH, Unit<H>>,
+    pub(crate) outgoing_units: ToSender<CH, NotificationOut<H>>,
 }
 
-async fn create_unit<H: Hasher>(
+async fn create_unit<H: Hasher, CH: CP2<Unit<H>, NotificationOut<H>>>(
     round: Round,
     creator: &mut Creator<H>,
     create_lag: &DelaySchedule,
     mut can_create: bool,
-    incoming_parents: &mut Receiver<Unit<H>>,
+    incoming_parents: &mut ToReceiver<CH, Unit<H>>,
     mut exit: &mut oneshot::Receiver<()>,
 ) -> Result<(PreUnit<H>, Vec<H::Hash>), ()> {
     let mut delay = Delay::new(create_lag(round.into())).fuse();
@@ -89,9 +89,9 @@ async fn create_unit<H: Hasher>(
 ///
 /// We refer to the documentation https://cardinal-cryptography.github.io/AlephBFT/internals.html
 /// Section 5.1 for a discussion of this component.
-pub async fn run<H: Hasher>(
+pub async fn run<H: Hasher, CH: CP2<Unit<H>, NotificationOut<H>>>(
     conf: Config,
-    io: IO<H>,
+    io: IO<H, CH>,
     starting_round: oneshot::Receiver<Round>,
     mut exit: oneshot::Receiver<()>,
 ) {

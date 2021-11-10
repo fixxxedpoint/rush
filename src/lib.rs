@@ -105,17 +105,24 @@ pub trait SpawnHandle: Clone + Send + 'static {
 pub(crate) trait Receiver<T>: Stream<Item = T> {}
 pub(crate) trait Sender<T>: Sink<T> {}
 
-pub trait HigherReceiver<T> {
+pub trait HigherKindedChannel<T> {
     type Receiver: Receiver<T>;
-}
-
-pub trait HigherSender<T> {
     type Sender: Sender<T>;
 }
 
-pub trait HigherOneShot<T> {
-    type OneShot: FusedFuture<Output = T>;
+pub trait HigherKindedOneShot<T> {
+    type Receiver: FusedFuture<Output = T>;
+    type Sender: FusedFuture<Output = T>;
 }
 
-type ToReceiver<R, T> = <R as HigherReceiver<T>>::Receiver;
-type ToSender<R, T> = <R as HigherSender<T>>::Sender;
+pub trait ChannelProvider<T>: HigherKindedChannel<T> + HigherKindedOneShot<T> {}
+pub trait CP<T>: ChannelProvider<T> {}
+pub trait CP2<T1, T2>: CP<T1> + CP<T2> {}
+pub trait CP3<T1, T2, T3>: CP2<T1, T2> + CP<T3> {}
+pub trait CP4<T1, T2, T3, T4>: CP3<T1, T2, T3> + CP<T4> {}
+pub trait CP5<T1, T2, T3, T4, T5>: CP4<T1, T2, T3, T4> + CP<T5> {}
+
+type ToReceiver<R, T> = <R as HigherKindedChannel<T>>::Receiver;
+type ToSender<R, T> = <R as HigherKindedChannel<T>>::Sender;
+type ToOneShotReceiver<O, T> = <O as HigherKindedOneShot<T>>::Receiver;
+type ToOneShotSender<O, T> = <O as HigherKindedOneShot<T>>::Sender;

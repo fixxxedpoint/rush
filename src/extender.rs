@@ -5,7 +5,7 @@ use log::{debug, info, warn};
 
 use crate::{
     nodes::{NodeCount, NodeIndex, NodeMap},
-    Hasher, Receiver, Round, Sender,
+    Hasher, Round, ToReceiver, ToSender, CP2,
 };
 
 pub(crate) struct ExtenderUnit<H: Hasher> {
@@ -64,24 +64,24 @@ impl CacheState {
 /// We refer to the documentation https://cardinal-cryptography.github.io/AlephBFT/internals.html
 /// Section 5.4 for a discussion of this component.
 
-pub(crate) struct Extender<H: Hasher> {
+pub(crate) struct Extender<H: Hasher, CH: CP2<ExtenderUnit<H>, Vec<H::Hash>>> {
     node_id: NodeIndex,
-    electors: Receiver<ExtenderUnit<H>>,
+    electors: ToReceiver<CH, ExtenderUnit<H>>,
     state: CacheState,
     units: HashMap<H::Hash, ExtenderUnit<H>>,
     units_by_round: Vec<Vec<H::Hash>>,
     n_members: NodeCount,
     candidates: Vec<H::Hash>,
-    finalizer_tx: Sender<Vec<H::Hash>>,
+    finalizer_tx: ToSender<CH, Vec<H::Hash>>,
     exiting: bool,
 }
 
-impl<H: Hasher> Extender<H> {
+impl<H: Hasher, CH: CP2<ExtenderUnit<H>, Vec<H::Hash>>> Extender<H, CH> {
     pub(crate) fn new(
         node_id: NodeIndex,
         n_members: NodeCount,
-        electors: Receiver<ExtenderUnit<H>>,
-        finalizer_tx: Sender<Vec<H::Hash>>,
+        electors: ToReceiver<CH, ExtenderUnit<H>>,
+        finalizer_tx: ToSender<CH, Vec<H::Hash>>,
     ) -> Self {
         Extender {
             node_id,

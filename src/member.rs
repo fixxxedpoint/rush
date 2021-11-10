@@ -4,8 +4,8 @@ use crate::{
     runway::{self, Request, Response, RunwayIO, RunwayNotificationIn, RunwayNotificationOut},
     signed::Signature,
     units::{UncheckedSignedUnit, UnitCoord},
-    Data, DataIO, Hasher, MultiKeychain, Network, NodeCount, NodeIndex, Receiver, Sender, Signable,
-    SpawnHandle, UncheckedSigned,
+    Data, DataIO, Hasher, MultiKeychain, Network, NodeCount, NodeIndex, Signable, SpawnHandle,
+    ToReceiver, ToSender, UncheckedSigned, CP5,
 };
 use codec::{Decode, Encode};
 use futures::{
@@ -130,11 +130,18 @@ impl<H: Hasher, D: Data, S: Signature> PartialOrd for ScheduledTask<H, D, S> {
     }
 }
 
-struct Member<H, D, S>
+struct Member<H, D, S, CH>
 where
     H: Hasher,
     D: Data,
     S: Signature,
+    CH: CP5<
+        (UnitMessage<H, D, S>, Recipient),
+        UnitMessage<H, D, S>,
+        RunwayNotificationIn<H, D, S>,
+        RunwayNotificationOut<H, D, S>,
+        Request<H>,
+    >,
 {
     config: Config,
     task_queue: BinaryHeap<ScheduledTask<H, D, S>>,
@@ -142,27 +149,34 @@ where
     not_resolved_coords: HashSet<UnitCoord>,
     newest_unit_resolved: bool,
     n_members: NodeCount,
-    unit_messages_for_network: Sender<(UnitMessage<H, D, S>, Recipient)>,
-    unit_messages_from_network: Receiver<UnitMessage<H, D, S>>,
-    notifications_for_runway: Sender<RunwayNotificationIn<H, D, S>>,
-    notifications_from_runway: Receiver<RunwayNotificationOut<H, D, S>>,
-    resolved_requests: Receiver<Request<H>>,
+    unit_messages_for_network: ToSender<CH, (UnitMessage<H, D, S>, Recipient)>,
+    unit_messages_from_network: ToReceiver<CH, UnitMessage<H, D, S>>,
+    notifications_for_runway: ToSender<CH, RunwayNotificationIn<H, D, S>>,
+    notifications_from_runway: ToReceiver<CH, RunwayNotificationOut<H, D, S>>,
+    resolved_requests: ToReceiver<CH, Request<H>>,
     exiting: bool,
 }
 
-impl<H, D, S> Member<H, D, S>
+impl<H, D, S, CH> Member<H, D, S, CH>
 where
     H: Hasher,
     D: Data,
     S: Signature,
+    CH: CP5<
+        (UnitMessage<H, D, S>, Recipient),
+        UnitMessage<H, D, S>,
+        RunwayNotificationIn<H, D, S>,
+        RunwayNotificationOut<H, D, S>,
+        Request<H>,
+    >,
 {
     fn new(
         config: Config,
-        unit_messages_for_network: Sender<(UnitMessage<H, D, S>, Recipient)>,
-        unit_messages_from_network: Receiver<UnitMessage<H, D, S>>,
-        notifications_for_runway: Sender<RunwayNotificationIn<H, D, S>>,
-        notifications_from_runway: Receiver<RunwayNotificationOut<H, D, S>>,
-        resolved_requests: Receiver<Request<H>>,
+        unit_messages_for_network: ToSender<CH, (UnitMessage<H, D, S>, Recipient)>,
+        unit_messages_from_network: ToReceiver<CH, UnitMessage<H, D, S>>,
+        notifications_for_runway: ToSender<CH, RunwayNotificationIn<H, D, S>>,
+        notifications_from_runway: ToReceiver<CH, RunwayNotificationOut<H, D, S>>,
+        resolved_requests: ToReceiver<CH, Request<H>>,
     ) -> Self {
         let n_members = config.n_members;
         Self {
