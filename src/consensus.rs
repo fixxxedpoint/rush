@@ -11,13 +11,11 @@ use crate::{
     extender::Extender,
     runway::{NotificationIn, NotificationOut},
     terminal::Terminal,
-    Hasher, OrderedBatch, Round, SpawnHandle, ToOneShotReceiver, ToReceiver, ToSender, CP5,
+    BasicAlephChannelProvider, Hasher, OrderedBatch, Round, SpawnHandle, ToOneShotReceiver,
+    ToReceiver, ToSender,
 };
 
-pub(crate) async fn run<
-    H: Hasher + 'static,
-    CH: CP5<NotificationIn<H>, NotificationOut<H>, OrderedBatch<H::Hash>, Round, ()>,
->(
+pub(crate) async fn run<H: Hasher + 'static, CH: BasicAlephChannelProvider<H>>(
     conf: Config,
     incoming_notifications: ToReceiver<CH, NotificationIn<H>>,
     outgoing_notifications: ToSender<CH, NotificationOut<H>>,

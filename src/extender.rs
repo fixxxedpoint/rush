@@ -5,7 +5,7 @@ use log::{debug, info, warn};
 
 use crate::{
     nodes::{NodeCount, NodeIndex, NodeMap},
-    Hasher, Round, ToReceiver, ToSender, CP2,
+    BasicAlephChannelProvider, Hasher, Round, ToReceiver, ToSender,
 };
 
 pub(crate) struct ExtenderUnit<H: Hasher> {
@@ -64,7 +64,7 @@ impl CacheState {
 /// We refer to the documentation https://cardinal-cryptography.github.io/AlephBFT/internals.html
 /// Section 5.4 for a discussion of this component.
 
-pub(crate) struct Extender<H: Hasher, CH: CP2<ExtenderUnit<H>, Vec<H::Hash>>> {
+pub(crate) struct Extender<H: Hasher, CH: BasicAlephChannelProvider<H>> {
     node_id: NodeIndex,
     electors: ToReceiver<CH, ExtenderUnit<H>>,
     state: CacheState,
@@ -76,7 +76,7 @@ pub(crate) struct Extender<H: Hasher, CH: CP2<ExtenderUnit<H>, Vec<H::Hash>>> {
     exiting: bool,
 }
 
-impl<H: Hasher, CH: CP2<ExtenderUnit<H>, Vec<H::Hash>>> Extender<H, CH> {
+impl<H: Hasher, CH: BasicAlephChannelProvider<H>> Extender<H, CH> {
     pub(crate) fn new(
         node_id: NodeIndex,
         n_members: NodeCount,

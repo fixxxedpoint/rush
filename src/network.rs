@@ -3,7 +3,7 @@ use crate::{
     member::UnitMessage,
     nodes::NodeIndex,
     signed::{PartialMultisignature, Signature},
-    Data, Hasher, ToOneShotReceiver, ToReceiver, ToSender, CP4, CP5,
+    Data, Hasher, MultiSignatureAlephChannelProvider, ToOneShotReceiver, ToReceiver, ToSender,
 };
 use codec::{Decode, Encode};
 use futures::{channel::oneshot, FutureExt, StreamExt};
@@ -117,12 +117,7 @@ struct NetworkHub<
     N: Network<H, D, S, MS>,
     CH,
 > where
-    CH: CP4<
-        (UnitMessage<H, D, S>, Recipient),
-        UnitMessage<H, D, S>,
-        (AlertMessage<H, D, S, MS>, Recipient),
-        AlertMessage<H, D, S, MS>,
-    >,
+    CH: MultiSignatureAlephChannelProvider<H, D, S, MS>,
 {
     network: N,
     units_to_send: ToReceiver<CH, (UnitMessage<H, D, S>, Recipient)>,
@@ -134,12 +129,7 @@ struct NetworkHub<
 impl<H: Hasher, D: Data, S: Signature, MS: PartialMultisignature, N: Network<H, D, S, MS>, CH>
     NetworkHub<H, D, S, MS, N, CH>
 where
-    CH: CP4<
-        (UnitMessage<H, D, S>, Recipient),
-        UnitMessage<H, D, S>,
-        (AlertMessage<H, D, S, MS>, Recipient),
-        AlertMessage<H, D, S, MS>,
-    >,
+    CH: MultiSignatureAlephChannelProvider<H, D, S, MS>,
 {
     fn new(
         network: N,
@@ -226,13 +216,7 @@ pub(crate) async fn run<
     alerts_received: ToSender<CH, AlertMessage<H, D, S, MS>>,
     exit: ToOneShotReceiver<CH, ()>,
 ) where
-    CH: CP5<
-        (UnitMessage<H, D, S>, Recipient),
-        UnitMessage<H, D, S>,
-        (AlertMessage<H, D, S, MS>, Recipient),
-        AlertMessage<H, D, S, MS>,
-        (),
-    >,
+    CH: MultiSignatureAlephChannelProvider<H, D, S, MS>,
 {
     NetworkHub::new(
         network,

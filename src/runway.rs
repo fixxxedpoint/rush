@@ -9,9 +9,10 @@ use crate::{
     units::{
         ControlHash, FullUnit, PreUnit, SignedUnit, UncheckedSignedUnit, Unit, UnitCoord, UnitStore,
     },
-    Config, Data, DataIO, Hasher, Index, MultiKeychain, NodeCount, NodeIndex, OrderedBatch, Round,
-    SessionId, Signature, Signed, SpawnHandle, ToOneShotReceiver, ToOneShotSender, ToReceiver,
-    ToSender, UncheckedSigned,
+    AlephChannelProvider, Config, Data, DataIO, Hasher, Index, MultiKeychain,
+    MultiSignatureAlephChannelProvider, NodeCount, NodeIndex, OrderedBatch, Round, SessionId,
+    Signature, Signed, SpawnHandle, ToOneShotReceiver, ToOneShotSender, ToReceiver, ToSender,
+    UncheckedSigned,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -109,6 +110,7 @@ where
     D: Data,
     MK: MultiKeychain,
     DP: DataIO<D>,
+    CH: AlephChannelProvider<H, D, MK::Signature>,
 {
     missing_coords: HashSet<UnitCoord>,
     missing_parents: HashSet<H::Hash>,
@@ -135,7 +137,14 @@ where
     exiting: bool,
 }
 
-struct RunwayConfig<'a, H: Hasher, D: Data, DP: DataIO<D>, MK: MultiKeychain, CH> {
+struct RunwayConfig<
+    'a,
+    H: Hasher,
+    D: Data,
+    DP: DataIO<D>,
+    MK: MultiKeychain,
+    CH: AlephChannelProvider<H, D, MK::Signature>,
+> {
     node_ix: NodeIndex,
     session_id: SessionId,
     n_members: NodeCount,
@@ -160,6 +169,7 @@ where
     D: Data,
     MK: MultiKeychain,
     DP: DataIO<D>,
+    CH: AlephChannelProvider<H, D, MK::Signature>,
 {
     fn new(config: RunwayConfig<'a, H, D, DP, MK, CH>) -> Self {
         let n_members = config.n_members;
@@ -801,7 +811,12 @@ where
     }
 }
 
-pub(crate) struct RunwayIO<H: Hasher, D: Data, MK: MultiKeychain, CH> {
+pub(crate) struct RunwayIO<
+    H: Hasher,
+    D: Data,
+    MK: MultiKeychain,
+    CH: MultiSignatureAlephChannelProvider<H, D, MK::Signature, MK::PartialMultisignature>,
+> {
     pub(crate) alert_messages_for_network: ToSender<
         CH,
         (
@@ -830,6 +845,7 @@ pub(crate) async fn run<H, D, MK, DP, SH, CH>(
     MK: MultiKeychain,
     DP: DataIO<D>,
     SH: SpawnHandle,
+    CH: MultiSignatureAlephChannelProvider<H, D, MK::Signature, MK::PartialMultisignature>,
 {
     let (tx_consensus, consensus_stream) = mpsc::unbounded();
     let (consensus_sink, rx_consensus) = mpsc::unbounded();

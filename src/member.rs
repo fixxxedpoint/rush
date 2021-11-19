@@ -4,8 +4,8 @@ use crate::{
     runway::{self, Request, Response, RunwayIO, RunwayNotificationIn, RunwayNotificationOut},
     signed::Signature,
     units::{UncheckedSignedUnit, UnitCoord},
-    Data, DataIO, Hasher, MultiKeychain, Network, NodeCount, NodeIndex, Signable, SpawnHandle,
-    ToReceiver, ToSender, UncheckedSigned, CP5,
+    AlephChannelProvider, Data, DataIO, Hasher, MultiKeychain, Network, NodeCount, NodeIndex,
+    Signable, SpawnHandle, ToReceiver, ToSender, UncheckedSigned,
 };
 use codec::{Decode, Encode};
 use futures::{
@@ -135,13 +135,7 @@ where
     H: Hasher,
     D: Data,
     S: Signature,
-    CH: CP5<
-        (UnitMessage<H, D, S>, Recipient),
-        UnitMessage<H, D, S>,
-        RunwayNotificationIn<H, D, S>,
-        RunwayNotificationOut<H, D, S>,
-        Request<H>,
-    >,
+    CH: AlephChannelProvider<H, D, S>,
 {
     config: Config,
     task_queue: BinaryHeap<ScheduledTask<H, D, S>>,
@@ -162,13 +156,7 @@ where
     H: Hasher,
     D: Data,
     S: Signature,
-    CH: CP5<
-        (UnitMessage<H, D, S>, Recipient),
-        UnitMessage<H, D, S>,
-        RunwayNotificationIn<H, D, S>,
-        RunwayNotificationOut<H, D, S>,
-        Request<H>,
-    >,
+    CH: AlephChannelProvider<H, D, S>,
 {
     fn new(
         config: Config,

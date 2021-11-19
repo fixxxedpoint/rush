@@ -5,8 +5,8 @@ use crate::{
     rmc::{DoublingDelayScheduler, ReliableMulticast},
     signed::{Multisigned, PartialMultisignature, Signable, Signature, Signed, UncheckedSigned},
     units::UncheckedSignedUnit,
-    Data, Hasher, Index, MultiKeychain, NodeIndex, SessionId, ToOneShotReceiver, ToReceiver,
-    ToSender, CP,
+    AlephChannelProvider, Data, Hasher, Index, MultiKeychain, MultiSignatureAlephChannelProvider,
+    NodeIndex, SessionId, ToOneShotReceiver, ToReceiver, ToSender,
 };
 use codec::{Decode, Encode};
 use derivative::Derivative;
@@ -142,13 +142,7 @@ struct Alerter<
     H: Hasher,
     D: Data,
     MK: MultiKeychain,
-    CH: CP<AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>>
-        + CP<ForkingNotification<H, D, MK::Signature>>
-        + CP<(
-            AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
-            Recipient,
-        )> + CP<Alert<H, D, MK::Signature>>
-        + CP<rmc::Message<H::Hash, MK::Signature, MK::PartialMultisignature>>,
+    CH: MultiSignatureAlephChannelProvider<H, D, MK::Signature, MK::PartialMultisignature>,
 > {
     session_id: SessionId,
     keychain: &'a MK,
@@ -183,13 +177,7 @@ impl<
         H: Hasher,
         D: Data,
         MK: MultiKeychain,
-        CH: CP<AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>>
-            + CP<ForkingNotification<H, D, MK::Signature>>
-            + CP<(
-                AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
-                Recipient,
-            )> + CP<Alert<H, D, MK::Signature>>
-            + CP<rmc::Message<H::Hash, MK::Signature, MK::PartialMultisignature>>,
+        CH: MultiSignatureAlephChannelProvider<H, D, MK::Signature, MK::PartialMultisignature>,
     > Alerter<'a, H, D, MK, CH>
 {
     fn new(
@@ -517,13 +505,7 @@ pub(crate) async fn run<
     H: Hasher,
     D: Data,
     MK: MultiKeychain,
-    CH: CP<(
-            AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>,
-            Recipient,
-        )> + CP<AlertMessage<H, D, MK::Signature, MK::PartialMultisignature>>
-        + CP<ForkingNotification<H, D, MK::Signature>>
-        + CP<Alert<H, D, MK::Signature>>
-        + CP<()>,
+    CH: MultiSignatureAlephChannelProvider<H, D, MK::Signature, MK::PartialMultisignature>,
 >(
     keychain: MK,
     messages_for_network: ToSender<

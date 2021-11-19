@@ -6,7 +6,7 @@ use crate::{
     nodes::{NodeCount, NodeIndex, NodeMap},
     runway::{NotificationIn, NotificationOut},
     units::{ControlHash, Unit, UnitCoord},
-    Hasher, Round, ToOneShotReceiver, ToReceiver, ToSender, CP,
+    BasicAlephChannelProvider, Hasher, Round, ToOneShotReceiver, ToReceiver, ToSender,
 };
 use log::{debug, info, trace, warn};
 
@@ -102,7 +102,7 @@ type SyncClosure<X, Y> = Box<dyn Fn(X) -> Y + Sync + Send + 'static>;
 /// We also refer to the documentation https://cardinal-cryptography.github.io/AlephBFT/internals.html
 /// Section 5.3 for a discussion of this component.
 
-pub(crate) struct Terminal<H: Hasher, CH: CP<NotificationIn<H>> + CP<NotificationOut<H>>> {
+pub(crate) struct Terminal<H: Hasher, CH: BasicAlephChannelProvider<H>> {
     node_id: NodeIndex,
     // A channel for receiving notifications (units mainly)
     ntfct_rx: ToReceiver<CH, NotificationIn<H>>,
@@ -128,7 +128,7 @@ pub(crate) struct Terminal<H: Hasher, CH: CP<NotificationIn<H>> + CP<Notificatio
     exiting: bool,
 }
 
-impl<H: Hasher, CH: CP<NotificationIn<H>> + CP<NotificationOut<H>>> Terminal<H, CH> {
+impl<H: Hasher, CH: BasicAlephChannelProvider<H>> Terminal<H, CH> {
     pub(crate) fn new(
         node_id: NodeIndex,
         ntfct_rx: ToReceiver<CH, NotificationIn<H>>,

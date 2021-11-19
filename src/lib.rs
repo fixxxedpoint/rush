@@ -2,12 +2,23 @@
 //! requires access to a network layer, a cryptographic primitive, and a data provider that
 //! gives appropriate access to the set of available data that we need to make consensus on.
 
+use alerts::Alert;
+use alerts::AlertMessage;
+use alerts::ForkingNotification;
 use codec::{Decode, Encode};
+use extender::ExtenderUnit;
 use futures::future::FusedFuture;
 use futures::stream::Stream;
 use futures::Future;
 use futures::Sink;
+use member::UnitMessage;
+use runway::NotificationIn;
+use runway::NotificationOut;
+use runway::Request;
+use runway::RunwayNotificationIn;
+use runway::RunwayNotificationOut;
 use std::{fmt::Debug, hash::Hash as StdHash, pin::Pin};
+use units::Unit;
 
 use crate::nodes::NodeMap;
 
@@ -116,11 +127,47 @@ pub trait HigherKindedOneShot<T> {
 }
 
 pub trait ChannelProvider<T>: HigherKindedChannel<T> + HigherKindedOneShot<T> {}
-pub trait CP<T>: ChannelProvider<T> {}
-pub trait CP2<T1, T2>: CP<T1> + CP<T2> {}
-pub trait CP3<T1, T2, T3>: CP2<T1, T2> + CP<T3> {}
-pub trait CP4<T1, T2, T3, T4>: CP3<T1, T2, T3> + CP<T4> {}
-pub trait CP5<T1, T2, T3, T4, T5>: CP4<T1, T2, T3, T4> + CP<T5> {}
+trait CP<T>: ChannelProvider<T> {}
+// pub trait CP2<T1, T2>: CP<T1> + CP<T2> {}
+// pub trait CP3<T1, T2, T3>: CP2<T1, T2> + CP<T3> {}
+// pub trait CP4<T1, T2, T3, T4>: CP3<T1, T2, T3> + CP<T4> {}
+// pub trait CP5<T1, T2, T3, T4, T5>: CP4<T1, T2, T3, T4> + CP<T5> {}
+trait BasicAlephChannelProvider<H: Hasher>:
+    CP<()>
+    + CP<NotificationIn<H>>
+    + CP<NotificationOut<H>>
+    + CP<OrderedBatch<H::Hash>>
+    + CP<Round>
+    + CP<Unit<H>>
+    + CP<Vec<H::Hash>>
+    + CP<ExtenderUnit<H>>
+{
+}
+
+trait AlephChannelProvider<H: Hasher, D: Data, S: Signature>:
+    BasicAlephChannelProvider<H>
+    + CP<ForkingNotification<H, D, S>>
+    + CP<Alert<H, D, S>>
+    + CP<(UnitMessage<H, D, S>, Recipient)>
+    + CP<UnitMessage<H, D, S>>
+    + CP<RunwayNotificationIn<H, D, S>>
+    + CP<RunwayNotificationOut<H, D, S>>
+    + CP<Request<H>>
+{
+}
+
+trait MultiSignatureAlephChannelProvider<
+    H: Hasher,
+    D: Data,
+    S: Signature,
+    MS: PartialMultisignature,
+>:
+    AlephChannelProvider<H, D, S>
+    + CP<AlertMessage<H, D, S, MS>>
+    + CP<(AlertMessage<H, D, S, MS>, Recipient)>
+    + CP<rmc::Message<H::Hash, S, MS>>
+{
+}
 
 type ToReceiver<R, T> = <R as HigherKindedChannel<T>>::Receiver;
 type ToSender<R, T> = <R as HigherKindedChannel<T>>::Sender;
