@@ -37,9 +37,13 @@ impl Terminator {
     }
 
     /// Get exit channel for current component
-    pub fn get_exit(&mut self) -> &mut Receiver<()> {
-        &mut self.parent_exit
+    pub async fn get_exit(&mut self) {
+        let _ = (&mut self.parent_exit).await;
     }
+
+    // pub fn is_terminated(&self) -> bool {
+    //     self.parent_exit.is_terminated()
+    // }
 
     /// Add a connection to an offspring component/task
     pub fn add_offspring_connection(&mut self, name: &'static str) -> Terminator {

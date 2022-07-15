@@ -1,4 +1,4 @@
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use std::collections::{hash_map::Entry, HashMap, VecDeque};
 
 use crate::{
@@ -366,7 +366,7 @@ impl<H: Hasher> Terminal<H> {
                         _ => {}
                     }
                 }
-                _ = &mut terminator.get_exit() => {
+                _ = terminator.get_exit().fuse() => {
                     info!(target: "AlephBFT-terminal", "{:?} received exit signal", self.node_id);
                     self.exiting = true;
                 }

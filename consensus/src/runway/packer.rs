@@ -86,7 +86,7 @@ where
         pin_mut!(pack);
         futures::select! {
             _ = pack => Err(()),
-            _ = terminator.get_exit() => {
+            _ = terminator.get_exit().fuse() => {
                 terminator.terminate_sync().await;
                 Ok(())
             },

@@ -43,9 +43,11 @@ async fn create_unit<H: Hasher>(
     create_lag: &DelaySchedule,
     mut can_create: bool,
     incoming_parents: &mut Receiver<Unit<H>>,
-    mut exit: &mut oneshot::Receiver<()>,
+    exit: &mut Terminator,
 ) -> Result<(PreUnit<H>, Vec<H::Hash>), ()> {
     let mut delay = Delay::new(create_lag(round.into())).fuse();
+    // let exit = exit.get_exit().fuse();
+    // pin_mut!(exit);
     loop {
         if can_create {
             if let Some(result) = creator.create_unit(round) {
@@ -67,7 +69,7 @@ async fn create_unit<H: Hasher>(
                 can_create = true;
                 delay = Delay::new(Duration::from_secs(30 * 60)).fuse();
             },
-            _ = exit => {
+            _ = exit.get_exit().fuse() => {
                 info!(target: "AlephBFT-creator", "Received exit signal.");
                 return Err(());
             },
@@ -107,7 +109,7 @@ pub async fn run<H: Hasher>(
     } = io;
 
     let starting_round = futures::select! {
-        maybe_round =  starting_round => match maybe_round {
+        maybe_round = starting_round => match maybe_round {
             Ok(Some(round)) => round,
             Ok(None) => {
                 warn!(target: "AlephBFT-creator", "None starting round provided. Exiting.");
@@ -118,7 +120,7 @@ pub async fn run<H: Hasher>(
                 return;
             }
         },
-        _ = &mut terminator.get_exit() => {
+        _ = terminator.get_exit().fuse() => {
             terminator.terminate_sync().await;
             return;
         },
@@ -136,7 +138,7 @@ pub async fn run<H: Hasher>(
             &create_lag,
             ignore_delay,
             &mut incoming_parents,
-            terminator.get_exit(),
+            &mut terminator,
         )
         .await
         {

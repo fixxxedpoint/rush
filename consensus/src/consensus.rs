@@ -74,7 +74,7 @@ pub(crate) async fn run<H: Hasher + 'static>(
     info!(target: "AlephBFT", "{:?} All services started.", index);
 
     futures::select! {
-        _ = terminator.get_exit() => {},
+        _ = terminator.get_exit().fuse() => {},
         _ = terminal_handle => {
             debug!(target: "AlephBFT-consensus", "{:?} terminal task terminated early.", index);
         },
