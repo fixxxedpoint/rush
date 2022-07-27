@@ -168,9 +168,9 @@ impl<T: Signable + Index, S: Signature> UncheckedSigned<T, S> {
         key_box: &KB,
     ) -> Result<Signed<T, KB>, SignatureError<T, S>> {
         let index = self.signable.index();
-        if !key_box.verify(self.signable.hash().as_ref(), &self.signature, index) {
-            return Err(SignatureError { unchecked: self });
-        }
+        // if !key_box.verify(self.signable.hash().as_ref(), &self.signature, index) {
+        //     return Err(SignatureError { unchecked: self });
+        // }
         Ok(Signed { unchecked: self })
     }
 }
@@ -557,10 +557,11 @@ impl<T, KB: KeyBox<T>> MultiKeychain<T> for DefaultMultiKeychain<T, KB> {
         if signature_count < self.quorum() {
             return false;
         }
-        partial.signatures.enumerate().all(|(i, sgn)| {
-            sgn.as_ref()
-                .map_or(true, |sgn| self.key_box.verify(msg, sgn, i))
-        })
+        // partial.signatures.enumerate().all(|(i, sgn)| {
+        //     sgn.as_ref()
+        //         .map_or(true, |sgn| self.key_box.verify(msg, sgn, i))
+        // })
+        true
     }
 }
 
@@ -594,13 +595,14 @@ pub(crate) mod owned_keybox {
         _marker: InvariantLifetime<'a>,
     }
 
+    pub trait OwnerCreator<'a> {
+        fn own<T>(value: T) -> Owned<'a, T>;
+    }
+
     impl<'a, T: Clone> Owned<'a, T> {
-        pub(crate) fn new<R>(value: T, f: impl for<'new_id> FnOnce(Owned<'new_id, T>) -> R) -> R {
-            let owned = Owned {
-                inner: value,
-                _marker: InvariantLifetime::new(),
-            };
-            f(owned)
+        pub(crate) fn new<R>(f: impl for<'new_id> FnOnce(impl OwnerCreator<'new_id>) -> R) -> R {
+            let creator = Creator::new();
+            f(creator)
         }
 
         fn own<TT: Clone>(&self, value: TT) -> Owned<'a, TT> {
@@ -613,6 +615,27 @@ pub(crate) mod owned_keybox {
         // TODO zamiast tego konwertuj Owned w jakis bezuzyteczny typ, i.e. NotOwned, ale spelniajacy wszystkie wymagania dla networka i nie posiadajacy zadnych lifetimeow
         pub(crate) fn unsafe_into(self) -> T {
             self.inner
+        }
+    }
+
+    struct Creator<'a> {
+        _marker: InvariantLifetime<'a>,
+    }
+
+    impl<'a> Creator<'a> {
+        fn new() -> Self {
+            Self {
+                _marker: InvariantLifetime::new(),
+            }
+        }
+    }
+
+    impl<'a> OwnerCreator for Creator<'a> {
+        fn own<T>(value: T) -> Owned<'a, T> {
+            Owned {
+                inner: value,
+                _marker: InvariantLifetime::new(),
+            }
         }
     }
 
@@ -667,14 +690,6 @@ pub(crate) mod owned_keybox {
         }
     }
 
-    // impl<S: PartialMultisignature> PartialMultisignature for NotOwned<S> {
-    //     type Signature = NotOwned<S::Signature>;
-
-    //     fn add_signature(self, signature: &Self::Signature, index: NodeIndex) -> Self {
-    //         NotOwned::new(self.inner.add_signature(&signature.inner, index))
-    //     }
-    // }
-
     impl<'id, S: PartialMultisignature> PartialMultisignature for Owned<'id, S> {
         type Signature = Owned<'id, S::Signature>;
 
@@ -684,8 +699,19 @@ pub(crate) mod owned_keybox {
         }
     }
 
-    impl<'id, T: Signable, KB: MultiKeychain<T>> MultiKeychain<T> for Owned<'id, KB> {
-        type PartialMultisignature = Owned<'id, KB::PartialMultisignature>;
+    pub struct OwningKeybox<'a, KB, C: OwnerCreator<'a>> {
+        creator: C,
+        keybox: KB,
+    }
+
+    impl<'a, KB, C: OwnerCreator<'a>> OwningKeybox<'a, KB, C> {
+        pub fn new(creator: C, keybox: KB) -> Self {
+            Self { creator, keybox }
+        }
+    }
+
+    impl<'a, T: Signable, KB: MultiKeychain<T>> MultiKeychain<T> for OwningKeybox<'a, KB, C> {
+        type PartialMultisignature = Owned<'a, KB::PartialMultisignature>;
 
         fn from_signature(
             &self,
@@ -693,11 +719,11 @@ pub(crate) mod owned_keybox {
             index: NodeIndex,
         ) -> Self::PartialMultisignature {
             let partial_signature = self.inner.from_signature(&signature.inner, index);
-            Owned::own(self, partial_signature)
+            self.creator.own(partial_signature)
         }
 
         fn is_complete(&self, msg: &[u8], partial: &Self::PartialMultisignature) -> bool {
-            self.inner.is_complete(msg, &partial.inner)
+            self.keybox.is_complete(msg, partial)
         }
     }
 }
