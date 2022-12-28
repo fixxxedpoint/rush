@@ -4,7 +4,11 @@ use crate::{
     units::{PreUnit, Unit},
     Hasher, NodeCount, NodeIndex, Receiver, Round, Sender, Terminator,
 };
-use futures::{channel::oneshot, FutureExt, StreamExt};
+use futures::{
+    channel::oneshot,
+    future::{select, Either},
+    Future, FutureExt, StreamExt,
+};
 use futures_timer::Delay;
 use log::{debug, error, trace, warn};
 use std::{
@@ -50,6 +54,24 @@ pub struct IO<H: Hasher> {
     pub(crate) incoming_parents: Receiver<Unit<H>>,
     pub(crate) outgoing_units: Sender<NotificationOut<H>>,
 }
+
+#[async_trait::async_trait]
+trait SelectFuture: Future {
+    async fn select<F>(self, future: F) -> Self::Output
+    where
+        Self: Sized,
+        F: Future<Output = Self::Output> + Send,
+    {
+        let pinned_self = Box::pin(self);
+        let pinned_future = Box::pin(future);
+        futures::select! {
+            r = pinned_self.fuse() => r,
+            r = pinned_future.fuse() => r,
+        }
+    }
+}
+
+impl<F: Future + Sized + Unpin + Send> SelectFuture for F {}
 
 fn very_long_delay() -> Delay {
     Delay::new(Duration::from_secs(30 * 60))
@@ -143,16 +165,36 @@ pub async fn run<H: Hasher>(
     mut terminator: Terminator,
 ) {
     futures::select! {
-        _ = run_internal(conf, io, starting_round).fuse() => {},
-        _ = terminator.get_exit().fuse() => {},
+        _ = async {
+            let maybe_round = starting_round.await;
+            let starting_round = match maybe_round {
+                Ok(Some(round)) => round,
+                Ok(None) => {
+                    warn!(target: "AlephBFT-creator", "None starting round provided. Exiting.");
+                    return;
+                }
+                Err(e) => {
+                    error!(target: "AlephBFT-creator", "Starting round not provided: {}", e);
+                    return;
+                }
+            };
+            match run_internal(conf, io, starting_round).await {
+                Ok(_) => {},
+                Err(()) =>
+                    debug!(target: "AlephBFT-creator", "Exiting Creator with an error.")
+                ,
+            };
+        }.fuse() => {},
+        _ = terminator.get_exit() => {},
     }
+
     terminator.terminate_sync().await;
 }
 
 async fn run_internal<H: Hasher>(
     conf: Config,
     io: IO<H>,
-    starting_round: oneshot::Receiver<Option<Round>>,
+    starting_round: Round,
 ) -> anyhow::Result<(), ()> {
     let Config {
         node_id,
@@ -165,19 +207,6 @@ async fn run_internal<H: Hasher>(
         mut incoming_parents,
         outgoing_units,
     } = io;
-
-    let maybe_round = starting_round.await;
-    let starting_round = match maybe_round {
-        Ok(Some(round)) => round,
-        Ok(None) => {
-            warn!(target: "AlephBFT-creator", "None starting round provided. Exiting.");
-            return Ok(());
-        }
-        Err(e) => {
-            error!(target: "AlephBFT-creator", "Starting round not provided: {}", e);
-            return Err(());
-        }
-    };
 
     debug!(target: "AlephBFT-creator", "Creator starting from round {}", starting_round);
     for round in starting_round..max_round {
