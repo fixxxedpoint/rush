@@ -86,7 +86,13 @@ async fn process_parent<H: Hasher>(
     creator: &mut Creator<H>,
     incoming_parents: &mut Receiver<Unit<H>>,
 ) -> anyhow::Result<(), ()> {
-    let unit = incoming_parents.next().await.ok_or(())?;
+    let unit = match incoming_parents.next().await {
+        Some(unit) => unit,
+        None => {
+            debug!(target: "AlephBFT-creator", "Incoming parent channel closed, exiting.");
+            return Err(());
+        }
+    };
     creator.add_unit(&unit);
     Ok(())
 }
@@ -108,10 +114,7 @@ async fn keep_processing_parents_until<H: Hasher>(
 ) -> anyhow::Result<(), ()> {
     futures::select! {
         result = keep_processing_parents(creator, incoming_parents).fuse() => {
-            if result.is_err() {
-                debug!(target: "AlephBFT-creator", "Incoming parent channel closed, exiting.");
-                return Err(());
-            }
+            result?
         },
         _ = until.fuse() => {
             debug!(target: "AlephBFT-creator", "Delay passed.");
