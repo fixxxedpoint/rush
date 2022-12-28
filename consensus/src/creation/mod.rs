@@ -4,7 +4,7 @@ use crate::{
     units::{PreUnit, Unit},
     Hasher, NodeCount, NodeIndex, Receiver, Round, Sender, Terminator,
 };
-use futures::{channel::oneshot, future::FusedFuture, FutureExt, StreamExt};
+use futures::{channel::oneshot, future::FusedFuture, pin_mut, FutureExt, StreamExt};
 use futures_timer::Delay;
 use log::{debug, error, trace, warn};
 use std::{
@@ -76,31 +76,42 @@ async fn create_unit<H: Hasher>(
     }
 }
 
+/// Tries to process a single parent from given `incoming_parents` receiver.
+/// Returns `true` iff given `delay` passed. Returns error when `exit` or `incoming_parents` are closed.
 async fn process_parent<H: Hasher>(
     creator: &mut Creator<H>,
     incoming_parents: &mut Receiver<Unit<H>>,
-    mut delay: impl FusedFuture<Output = ()> + Unpin,
+    delay: impl FusedFuture<Output = ()>,
     mut exit: &mut oneshot::Receiver<()>,
 ) -> anyhow::Result<bool, ()> {
+    pin_mut!(delay);
+    if delay.as_mut().now_or_never().is_some() {
+        debug!(target: "AlephBFT-creator", "Delay passed.");
+        return Ok(true);
+    }
     futures::select! {
         unit = incoming_parents.next() => match unit {
-            Some(unit) => {creator.add_unit(&unit); return Ok(false);},
+            Some(unit) => {
+                creator.add_unit(&unit);
+                Ok(false)
+            },
             None => {
                 debug!(target: "AlephBFT-creator", "Incoming parent channel closed, exiting.");
-                return Err(());
+                Err(())
             }
         },
         _ = &mut exit => {
             debug!(target: "AlephBFT-creator", "Received exit signal.");
-            return Err(());
+            Err(())
         },
         _ = delay => {
             debug!(target: "AlephBFT-creator", "Delay passed.");
-            return Ok(true);
+            Ok(true)
         },
     }
 }
 
+/// Tries to process new parents from `incoming_parents` until it encounters an error or a signal on `exit` channel.
 async fn keep_processing_parents<H: Hasher>(
     creator: &mut Creator<H>,
     incoming_parents: &mut Receiver<Unit<H>>,
@@ -171,9 +182,10 @@ pub async fn run<H: Hasher>(
         // delay we should observe.
         // NOTE: even we've observed a unit from a higher round, our own unit from previous round
         // might not be yet added to `creator`. We still might need to wait for its arrival.
-        let ignore_delay = creator.current_round() > round;
-        if !ignore_delay {
+        let should_delay = !(creator.current_round() > round);
+        if should_delay {
             let lag = Delay::new(create_lag(round.into()));
+
             if keep_processing_parents(
                 &mut creator,
                 &mut incoming_parents,
@@ -186,6 +198,7 @@ pub async fn run<H: Hasher>(
                 return;
             }
         }
+
         let (unit, parent_hashes) = match create_unit(
             round,
             &mut creator,
