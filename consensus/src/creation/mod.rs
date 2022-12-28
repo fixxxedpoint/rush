@@ -5,9 +5,8 @@ use crate::{
     Hasher, NodeCount, NodeIndex, Receiver, Round, Sender, Terminator,
 };
 use futures::{
-    channel::oneshot,
-    future::{select, Either},
-    Future, FutureExt, StreamExt,
+    channel::{mpsc::SendError, oneshot},
+    FutureExt, StreamExt,
 };
 use futures_timer::Delay;
 use log::{debug, error, trace, warn};
@@ -55,24 +54,6 @@ pub struct IO<H: Hasher> {
     pub(crate) outgoing_units: Sender<NotificationOut<H>>,
 }
 
-#[async_trait::async_trait]
-trait SelectFuture: Future {
-    async fn select<F>(self, future: F) -> Self::Output
-    where
-        Self: Sized,
-        F: Future<Output = Self::Output> + Send,
-    {
-        let pinned_self = Box::pin(self);
-        let pinned_future = Box::pin(future);
-        futures::select! {
-            r = pinned_self.fuse() => r,
-            r = pinned_future.fuse() => r,
-        }
-    }
-}
-
-impl<F: Future + Sized + Unpin + Send> SelectFuture for F {}
-
 fn very_long_delay() -> Delay {
     Delay::new(Duration::from_secs(30 * 60))
 }
@@ -108,13 +89,7 @@ async fn process_parent<H: Hasher>(
     creator: &mut Creator<H>,
     incoming_parents: &mut Receiver<Unit<H>>,
 ) -> anyhow::Result<(), ()> {
-    let unit = match incoming_parents.next().await {
-        Some(unit) => unit,
-        None => {
-            debug!(target: "AlephBFT-creator", "Incoming parent channel closed, exiting.");
-            return Err(());
-        }
-    };
+    let unit = incoming_parents.next().await.ok_or(())?;
     creator.add_unit(&unit);
     Ok(())
 }
@@ -160,11 +135,12 @@ async fn keep_processing_parents_until<H: Hasher>(
 /// Section 5.1 for a discussion of this component.
 pub async fn run<H: Hasher>(
     conf: Config,
-    io: IO<H>,
+    mut io: IO<H>,
     starting_round: oneshot::Receiver<Option<Round>>,
     mut terminator: Terminator,
 ) {
     futures::select! {
+        _ = terminator.get_exit() => {},
         _ = async {
             let maybe_round = starting_round.await;
             let starting_round = match maybe_round {
@@ -178,24 +154,31 @@ pub async fn run<H: Hasher>(
                     return;
                 }
             };
-            match run_internal(conf, io, starting_round).await {
+
+            match run_creator(conf, &mut io, starting_round).await {
                 Ok(_) => {},
-                Err(()) =>
-                    debug!(target: "AlephBFT-creator", "Exiting Creator with an error.")
-                ,
+                Err(err) =>
+                    match err {
+                        CreatorError::OutChannelClosed(e) => warn!(target: "AlephBFT-creator", "Notification send error: {}. Exiting.", e),
+                        CreatorError::ParentsChannelClosed => debug!(target: "AlephBFT-creator", "Incoming parent channel closed, exiting."),
+                    },
             };
         }.fuse() => {},
-        _ = terminator.get_exit() => {},
     }
 
     terminator.terminate_sync().await;
 }
 
-async fn run_internal<H: Hasher>(
+enum CreatorError {
+    OutChannelClosed(SendError),
+    ParentsChannelClosed,
+}
+
+async fn run_creator<H: Hasher>(
     conf: Config,
-    io: IO<H>,
+    io: &mut IO<H>,
     starting_round: Round,
-) -> anyhow::Result<(), ()> {
+) -> anyhow::Result<(), CreatorError> {
     let Config {
         node_id,
         n_members,
@@ -203,10 +186,8 @@ async fn run_internal<H: Hasher>(
         max_round,
     } = conf;
     let mut creator = Creator::new(node_id, n_members);
-    let IO {
-        mut incoming_parents,
-        outgoing_units,
-    } = io;
+    let incoming_parents = &mut io.incoming_parents;
+    let outgoing_units = &io.outgoing_units;
 
     debug!(target: "AlephBFT-creator", "Creator starting from round {}", starting_round);
     for round in starting_round..max_round {
@@ -218,16 +199,21 @@ async fn run_internal<H: Hasher>(
         let should_delay = !(creator.current_round() > round);
         if should_delay {
             let lag = Delay::new(create_lag(round.into()));
-            keep_processing_parents_until(&mut creator, &mut incoming_parents, lag).await?;
+            keep_processing_parents_until(&mut creator, incoming_parents, lag)
+                .await
+                .map_err(|_| CreatorError::ParentsChannelClosed)?;
         }
 
-        let (unit, parent_hashes) = create_unit(round, &mut creator, &mut incoming_parents).await?;
+        let (unit, parent_hashes) = create_unit(round, &mut creator, incoming_parents)
+            .await
+            .map_err(|_| CreatorError::ParentsChannelClosed)?;
+
         trace!(target: "AlephBFT-creator", "Created a new unit {:?} at round {:?}.", unit, round);
         if let Err(e) =
             outgoing_units.unbounded_send(NotificationOut::CreatedPreUnit(unit, parent_hashes))
         {
             warn!(target: "AlephBFT-creator", "Notification send error: {}. Exiting.", e);
-            return Err(());
+            return Err(CreatorError::OutChannelClosed(e.into_send_error()));
         }
     }
 
