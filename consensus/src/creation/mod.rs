@@ -59,9 +59,9 @@ async fn create_unit<H: Hasher>(
     round: Round,
     creator: &mut Creator<H>,
     incoming_parents: &mut Receiver<Unit<H>>,
-    mut exit: &mut oneshot::Receiver<()>,
+    exit: &mut oneshot::Receiver<()>,
 ) -> Result<(PreUnit<H>, Vec<H::Hash>), ()> {
-    let mut delay = very_long_delay().fuse();
+    let mut delay = very_long_delay();
     loop {
         match creator.create_unit(round) {
             Ok(unit) => return Ok(unit),
@@ -69,23 +69,7 @@ async fn create_unit<H: Hasher>(
                 debug!(target: "AlephBFT-creator", "Creator unable to create a new unit at round {:?}: {}.", round, err)
             }
         }
-        futures::select! {
-            unit = incoming_parents.next() => match unit {
-                Some(unit) => creator.add_unit(&unit),
-                None => {
-                    debug!(target: "AlephBFT-creator", "Incoming parent channel closed, exiting.");
-                    return Err(());
-                }
-            },
-            _ = &mut delay => {
-                warn!(target: "AlephBFT-creator", "Delay passed at round {} despite us not waiting for it.", &round);
-                delay = very_long_delay().fuse();
-            },
-            _ = exit => {
-                debug!(target: "AlephBFT-creator", "Received exit signal.");
-                return Err(());
-            },
-        }
+        process_parent(creator, incoming_parents, &mut delay, exit).await?;
     }
 }
 
@@ -94,23 +78,23 @@ async fn process_parent<H: Hasher>(
     incoming_parents: &mut Receiver<Unit<H>>,
     delay: &mut Delay,
     mut exit: &mut oneshot::Receiver<()>,
-) -> anyhow::Result<(), bool> {
+) -> anyhow::Result<(), ()> {
     let mut delay = delay.fuse();
     futures::select! {
         unit = incoming_parents.next() => match unit {
             Some(unit) => {creator.add_unit(&unit); return Ok(());},
             None => {
                 debug!(target: "AlephBFT-creator", "Incoming parent channel closed, exiting.");
-                return Err(false);
+                return Err(());
             }
         },
         _ = &mut exit => {
             debug!(target: "AlephBFT-creator", "Received exit signal.");
-            return Err(false);
+            return Err(());
         },
         _ = delay => {
             debug!(target: "AlephBFT-creator", "Delay passed.");
-            return Err(true);
+            return Ok(());
         },
     }
 }
@@ -122,15 +106,8 @@ async fn keep_processing_parents<H: Hasher>(
     exit: &mut oneshot::Receiver<()>,
 ) -> anyhow::Result<(), ()> {
     loop {
-        if let Err(delay_passed) = process_parent(creator, incoming_parents, &mut delay, exit).await
-        {
-            if delay_passed {
-                return Ok(());
-            }
-            break;
-        }
+        process_parent(creator, incoming_parents, &mut delay, exit).await?;
     }
-    Err(())
 }
 
 /// A process responsible for creating new units. It receives all the units added locally to the Dag
