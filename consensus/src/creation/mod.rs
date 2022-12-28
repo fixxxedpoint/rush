@@ -4,7 +4,11 @@ use crate::{
     units::{PreUnit, Unit},
     Hasher, NodeCount, NodeIndex, Receiver, Round, Sender, Terminator,
 };
-use futures::{channel::oneshot, FutureExt, StreamExt};
+use futures::{
+    channel::oneshot,
+    future::{select, Either},
+    pin_mut, Future, FutureExt, StreamExt, TryFutureExt,
+};
 use futures_timer::Delay;
 use log::{debug, error, warn};
 use std::{
@@ -58,22 +62,15 @@ fn very_long_delay() -> Delay {
 async fn create_unit<H: Hasher>(
     round: Round,
     creator: &mut Creator<H>,
-    create_delay: Option<Delay>,
     incoming_parents: &mut Receiver<Unit<H>>,
     mut exit: &mut oneshot::Receiver<()>,
 ) -> Result<(PreUnit<H>, Vec<H::Hash>), ()> {
-    let (initial_delay, mut delay_passed) = match create_delay {
-        None => (very_long_delay(), true),
-        Some(delay) => (delay, false),
-    };
-    let mut delay = initial_delay.fuse();
+    let mut delay = very_long_delay().fuse();
     loop {
-        if delay_passed {
-            match creator.create_unit(round) {
-                Ok(unit) => return Ok(unit),
-                Err(err) => {
-                    debug!(target: "AlephBFT-creator", "Creator unable to create a new unit at round {:?}: {}.", round, err)
-                }
+        match creator.create_unit(round) {
+            Ok(unit) => return Ok(unit),
+            Err(err) => {
+                debug!(target: "AlephBFT-creator", "Creator unable to create a new unit at round {:?}: {}.", round, err)
             }
         }
         futures::select! {
@@ -85,10 +82,7 @@ async fn create_unit<H: Hasher>(
                 }
             },
             _ = &mut delay => {
-                if delay_passed {
-                    warn!(target: "AlephBFT-creator", "Delay passed at round {} despite us not waiting for it.", &round);
-                }
-                delay_passed = true;
+                warn!(target: "AlephBFT-creator", "Delay passed at round {} despite us not waiting for it.", &round);
                 delay = very_long_delay().fuse();
             },
             _ = exit => {
@@ -97,6 +91,26 @@ async fn create_unit<H: Hasher>(
             },
         }
     }
+}
+
+async fn process_parent<H: Hasher>(
+    creator: &mut Creator<H>,
+    incoming_parents: &mut Receiver<Unit<H>>,
+    exit: impl Future<Output = ()>,
+) -> anyhow::Result<(), ()> {
+    let exit = exit.fuse();
+    pin_mut!(exit);
+    futures::select! {
+        unit = incoming_parents.next() => match unit {
+            Some(unit) => creator.add_unit(&unit),
+            None => {
+                debug!(target: "AlephBFT-creator", "Incoming parent channel closed, exiting.");
+                return Err(());
+            }
+        },
+        _ = &mut exit => {},
+    }
+    Ok(())
 }
 
 /// A process responsible for creating new units. It receives all the units added locally to the Dag
@@ -156,15 +170,41 @@ pub async fn run<H: Hasher>(
         // NOTE: even we've observed a unit from a higher round, our own unit from previous round
         // might not be yet added to `creator`. We still might need to wait for its arrival.
         let ignore_delay = creator.current_round() > round;
-        let lag = if ignore_delay {
-            None
-        } else {
-            Some(Delay::new(create_lag(round.into())))
-        };
+        if !ignore_delay {
+            let lag = Delay::new(create_lag(round.into())).then(|_| async {
+                debug!(target: "AlephBFT-creator", "Create-lag passed.");
+            });
+            let exit = terminator.get_exit().then(|_| async {
+                debug!(target: "AlephBFT-creator", "Received exit signal.");
+            });
+            pin_mut!(lag);
+            pin_mut!(exit);
+            let exit = select(lag, exit).then(|_| async {});
+            pin_mut!(exit);
+            if process_parent(&mut creator, &mut incoming_parents, exit)
+                .await
+                .is_err()
+            {}
+
+            // pin_mut!(parents);
+            // match select(parents, select(terminator.get_exit(), lag)).await {
+            //     Either::Left(_) => {
+            //         warn!(target: "AlephBFT-creator", "Incoming parent channel closed, exiting.");
+            //         return;
+            //     }
+            //     Either::Right(timeout) => match timeout {
+            //         Either::Left(_) => debug!(target: "AlephBFT-creator", "Received exit signal."),
+            //         _ => {}
+            //     },
+            // }
+            // // {
+            // //     warn!(target: "AlephBFT-creator", "Incoming parent channel closed, exiting.");
+            // //     return;
+            // // }
+        }
         let (unit, parent_hashes) = match create_unit(
             round,
             &mut creator,
-            lag,
             &mut incoming_parents,
             terminator.get_exit(),
         )
