@@ -4,13 +4,9 @@ use crate::{
     units::{PreUnit, Unit},
     Hasher, NodeCount, NodeIndex, Receiver, Round, Sender, Terminator,
 };
-use futures::{
-    channel::oneshot,
-    future::{select, Either},
-    pin_mut, Future, FutureExt, StreamExt, TryFutureExt,
-};
+use futures::{channel::oneshot, FutureExt, StreamExt};
 use futures_timer::Delay;
-use log::{debug, error, warn};
+use log::{debug, error, trace, warn};
 use std::{
     fmt::{Debug, Formatter},
     time::Duration,
@@ -96,21 +92,45 @@ async fn create_unit<H: Hasher>(
 async fn process_parent<H: Hasher>(
     creator: &mut Creator<H>,
     incoming_parents: &mut Receiver<Unit<H>>,
-    exit: impl Future<Output = ()>,
-) -> anyhow::Result<(), ()> {
-    let exit = exit.fuse();
-    pin_mut!(exit);
+    delay: &mut Delay,
+    mut exit: &mut oneshot::Receiver<()>,
+) -> anyhow::Result<(), bool> {
+    let mut delay = delay.fuse();
     futures::select! {
         unit = incoming_parents.next() => match unit {
-            Some(unit) => creator.add_unit(&unit),
+            Some(unit) => {creator.add_unit(&unit); return Ok(());},
             None => {
                 debug!(target: "AlephBFT-creator", "Incoming parent channel closed, exiting.");
-                return Err(());
+                return Err(false);
             }
         },
-        _ = &mut exit => {},
+        _ = &mut exit => {
+            debug!(target: "AlephBFT-creator", "Received exit signal.");
+            return Err(false);
+        },
+        _ = delay => {
+            debug!(target: "AlephBFT-creator", "Delay passed.");
+            return Err(true);
+        },
     }
-    Ok(())
+}
+
+async fn keep_processing_parents<H: Hasher>(
+    creator: &mut Creator<H>,
+    incoming_parents: &mut Receiver<Unit<H>>,
+    mut delay: Delay,
+    exit: &mut oneshot::Receiver<()>,
+) -> anyhow::Result<(), ()> {
+    loop {
+        if let Err(delay_passed) = process_parent(creator, incoming_parents, &mut delay, exit).await
+        {
+            if delay_passed {
+                return Ok(());
+            }
+            break;
+        }
+    }
+    Err(())
 }
 
 /// A process responsible for creating new units. It receives all the units added locally to the Dag
@@ -171,36 +191,18 @@ pub async fn run<H: Hasher>(
         // might not be yet added to `creator`. We still might need to wait for its arrival.
         let ignore_delay = creator.current_round() > round;
         if !ignore_delay {
-            let lag = Delay::new(create_lag(round.into())).then(|_| async {
-                debug!(target: "AlephBFT-creator", "Create-lag passed.");
-            });
-            let exit = terminator.get_exit().then(|_| async {
-                debug!(target: "AlephBFT-creator", "Received exit signal.");
-            });
-            pin_mut!(lag);
-            pin_mut!(exit);
-            let exit = select(lag, exit).then(|_| async {});
-            pin_mut!(exit);
-            if process_parent(&mut creator, &mut incoming_parents, exit)
-                .await
-                .is_err()
-            {}
-
-            // pin_mut!(parents);
-            // match select(parents, select(terminator.get_exit(), lag)).await {
-            //     Either::Left(_) => {
-            //         warn!(target: "AlephBFT-creator", "Incoming parent channel closed, exiting.");
-            //         return;
-            //     }
-            //     Either::Right(timeout) => match timeout {
-            //         Either::Left(_) => debug!(target: "AlephBFT-creator", "Received exit signal."),
-            //         _ => {}
-            //     },
-            // }
-            // // {
-            // //     warn!(target: "AlephBFT-creator", "Incoming parent channel closed, exiting.");
-            // //     return;
-            // // }
+            let lag = Delay::new(create_lag(round.into()));
+            if keep_processing_parents(
+                &mut creator,
+                &mut incoming_parents,
+                lag,
+                terminator.get_exit(),
+            )
+            .await
+            .is_err()
+            {
+                return;
+            }
         }
         let (unit, parent_hashes) = match create_unit(
             round,
@@ -216,6 +218,7 @@ pub async fn run<H: Hasher>(
                 return;
             }
         };
+        trace!(target: "AlephBFT-creator", "Created a new unit {:?} at round {:?}.", unit, round);
         if let Err(e) =
             outgoing_units.unbounded_send(NotificationOut::CreatedPreUnit(unit, parent_hashes))
         {
