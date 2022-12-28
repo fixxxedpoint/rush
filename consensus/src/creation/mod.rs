@@ -4,7 +4,7 @@ use crate::{
     units::{PreUnit, Unit},
     Hasher, NodeCount, NodeIndex, Receiver, Round, Sender, Terminator,
 };
-use futures::{channel::oneshot, FutureExt, StreamExt};
+use futures::{channel::oneshot, future::FusedFuture, FutureExt, StreamExt};
 use futures_timer::Delay;
 use log::{debug, error, trace, warn};
 use std::{
@@ -61,7 +61,7 @@ async fn create_unit<H: Hasher>(
     incoming_parents: &mut Receiver<Unit<H>>,
     exit: &mut oneshot::Receiver<()>,
 ) -> Result<(PreUnit<H>, Vec<H::Hash>), ()> {
-    let mut delay = very_long_delay();
+    let mut delay = very_long_delay().fuse();
     loop {
         match creator.create_unit(round) {
             Ok(unit) => return Ok(unit),
@@ -69,20 +69,22 @@ async fn create_unit<H: Hasher>(
                 debug!(target: "AlephBFT-creator", "Creator unable to create a new unit at round {:?}: {}.", round, err)
             }
         }
-        process_parent(creator, incoming_parents, &mut delay, exit).await?;
+        if process_parent(creator, incoming_parents, &mut delay, exit).await? {
+            warn!(target: "AlephBFT-creator", "Delay passed at round {} despite us not waiting for it.", &round);
+            delay = very_long_delay().fuse();
+        }
     }
 }
 
 async fn process_parent<H: Hasher>(
     creator: &mut Creator<H>,
     incoming_parents: &mut Receiver<Unit<H>>,
-    delay: &mut Delay,
+    mut delay: impl FusedFuture<Output = ()> + Unpin,
     mut exit: &mut oneshot::Receiver<()>,
-) -> anyhow::Result<(), ()> {
-    let mut delay = delay.fuse();
+) -> anyhow::Result<bool, ()> {
     futures::select! {
         unit = incoming_parents.next() => match unit {
-            Some(unit) => {creator.add_unit(&unit); return Ok(());},
+            Some(unit) => {creator.add_unit(&unit); return Ok(false);},
             None => {
                 debug!(target: "AlephBFT-creator", "Incoming parent channel closed, exiting.");
                 return Err(());
@@ -94,7 +96,7 @@ async fn process_parent<H: Hasher>(
         },
         _ = delay => {
             debug!(target: "AlephBFT-creator", "Delay passed.");
-            return Ok(());
+            return Ok(true);
         },
     }
 }
@@ -102,11 +104,14 @@ async fn process_parent<H: Hasher>(
 async fn keep_processing_parents<H: Hasher>(
     creator: &mut Creator<H>,
     incoming_parents: &mut Receiver<Unit<H>>,
-    mut delay: Delay,
+    delay: Delay,
     exit: &mut oneshot::Receiver<()>,
 ) -> anyhow::Result<(), ()> {
+    let mut delay = delay.fuse();
     loop {
-        process_parent(creator, incoming_parents, &mut delay, exit).await?;
+        if process_parent(creator, incoming_parents, &mut delay, exit).await? {
+            return Ok(());
+        }
     }
 }
 
