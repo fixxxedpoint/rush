@@ -304,7 +304,7 @@ impl<H: Hasher> Extender<H> {
                         self.progress(v_hash)
                     }
                 }
-                _ = terminator.get_exit().fuse() => {
+                _ = terminator.wait_for_exit().fuse() => {
                     debug!(target: "AlephBFT-extender", "{:?} received exit signal.", self.node_id);
                     self.exiting = true;
                 }

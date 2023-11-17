@@ -56,7 +56,7 @@ impl<H: Hasher, D: Data, S: Signature, W: Write> BackupSaver<H, D, S, W> {
                         break;
                     }
                 },
-                _ = terminator.get_exit().fuse() => {
+                _ = terminator.wait_for_exit().fuse() => {
                     debug!(target: LOG_TARGET, "backup saver received exit signal.");
                     terminator_exit = true;
                 }

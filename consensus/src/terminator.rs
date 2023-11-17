@@ -52,7 +52,7 @@ impl Terminator {
     /// When ready, returns reason why we should exit. `Ok` should be interpreted as "all good, our parent decided to gracefully
     /// exit". `Err` is returned when our parent autonomously decided to exit, without first receiving such request from its
     /// parent.
-    pub async fn get_exit(&mut self) -> Result<(), ()> {
+    pub async fn wait_for_exit(&mut self) -> Result<(), ()> {
         if let Some(returned) = self.returned_result {
             return returned;
         }
@@ -192,7 +192,7 @@ mod tests {
     use crate::Terminator;
 
     async fn leaf(mut terminator: Terminator) {
-        let _ = terminator.get_exit().await;
+        let _ = terminator.wait_for_exit().await;
         terminator.terminate_sync().await;
     }
 
@@ -207,7 +207,7 @@ mod tests {
             return;
         }
 
-        _ = terminator.get_exit().await;
+        _ = terminator.wait_for_exit().await;
         terminator.terminate_sync().await;
 
         let _ = leaf_handle_1.await;
@@ -231,7 +231,7 @@ mod tests {
             _ = leaf_handle_1 => assert!(with_crash, "leaf crashed when it wasn't supposed to"),
             _ = leaf_handle_2 => assert!(with_crash, "leaf crashed when it wasn't supposed to"),
             _ = internal_handle => assert!(with_crash, "internal_1 crashed when it wasn't supposed to"),
-            _ = terminator.get_exit().fuse() => assert!(!with_crash, "exited when we expected internal crash"),
+            _ = terminator.wait_for_exit().fuse() => assert!(!with_crash, "exited when we expected internal crash"),
         }
 
         let terminator_handle = terminator.terminate_sync().fuse();
@@ -262,7 +262,7 @@ mod tests {
         select! {
             _ = leaf_handle => assert!(with_crash, "leaf crashed when it wasn't supposed to"),
             _ = internal_handle => assert!(with_crash, "internal_2 crashed when it wasn't supposed to"),
-            _ = terminator.get_exit().fuse() => assert!(!with_crash, "exited when we expected internal crash"),
+            _ = terminator.wait_for_exit().fuse() => assert!(!with_crash, "exited when we expected internal crash"),
         }
 
         let terminator_handle = terminator.terminate_sync().fuse();

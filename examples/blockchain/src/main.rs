@@ -179,7 +179,7 @@ async fn main() {
     info!(target: "Blockchain-main", "Achieved {:?} tps.", tps);
 
     terminator_tx.send(()).expect("should send");
-    terminator.get_exit().await.expect("should receive");
+    terminator.wait_for_exit().await.expect("should receive");
     terminator.terminate_sync().await;
 
     member_handle.await.unwrap();

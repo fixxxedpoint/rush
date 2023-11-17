@@ -87,7 +87,7 @@ where
 
         futures::select! {
             _ = pack => Err(()),
-            _ = terminator.get_exit().fuse() => {
+            _ = terminator.wait_for_exit().fuse() => {
                 terminator.terminate_sync().await;
                 Ok(())
             },

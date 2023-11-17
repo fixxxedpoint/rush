@@ -141,7 +141,7 @@ pub async fn run_blockchain(
                 _ = &mut delay_fut => {
                     //We do nothing, but this takes us out of the select.
                 }
-                _ = terminator.get_exit().fuse() => {
+                _ = terminator.wait_for_exit().fuse() => {
                     info!(target: "Blockchain-chain", "Received exit signal.");
                     terminator.terminate_sync().await;
                     return;

@@ -536,7 +536,7 @@ where
                     status_ticker = Delay::new(status_ticker_delay).fuse();
                 },
 
-                _ = terminator.get_exit().fuse() => {
+                _ = terminator.wait_for_exit().fuse() => {
                     debug!(target: "AlephBFT-member", "{:?} received exit signal", self.index());
                     self.exiting = true;
                 },
@@ -681,7 +681,7 @@ pub async fn run_session<
             error!(target: "AlephBFT-member", "{:?} Member terminated early.", index);
         },
 
-        _ = terminator.get_exit().fuse() => {
+        _ = terminator.wait_for_exit().fuse() => {
             debug!(target: "AlephBFT-member", "{:?} exit channel was called.", index);
         },
     }

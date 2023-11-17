@@ -183,7 +183,7 @@ impl<H: Hasher, D: Data, MK: MultiKeychain> Service<H, D, MK> {
                 message = self.rmc_service.next_message().fuse() => {
                     self.rmc_message_to_network(message);
                 },
-                _ = terminator.get_exit().fuse() => {
+                _ = terminator.wait_for_exit().fuse() => {
                     debug!(target: LOG_TARGET, "Received exit signal.");
                     self.exiting = true;
                 },

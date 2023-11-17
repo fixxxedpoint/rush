@@ -95,27 +95,21 @@ async fn process_unit<H: Hasher>(
     Ok(())
 }
 
-async fn keep_processing_units<H: Hasher>(
-    creator: &mut Creator<H>,
-    incoming_parents: &mut Receiver<Unit<H>>,
-) -> anyhow::Result<(), CreatorError> {
-    loop {
-        process_unit(creator, incoming_parents).await?;
-    }
-}
-
 async fn keep_processing_units_until<H: Hasher>(
     creator: &mut Creator<H>,
     incoming_parents: &mut Receiver<Unit<H>>,
-    until: Delay,
+    mut until: Delay,
 ) -> anyhow::Result<(), CreatorError> {
-    futures::select! {
-        result = keep_processing_units(creator, incoming_parents).fuse() => {
-            result?
-        },
-        _ = until.fuse() => {
-            debug!(target: "AlephBFT-creator", "Delay passed.");
-        },
+    loop {
+        futures::select! {
+            result = process_unit(creator, incoming_parents).fuse() => {
+                result?
+            },
+            _ = (&mut until).fuse() => {
+                debug!(target: "AlephBFT-creator", "Delay passed.");
+                break;
+            },
+        }
     }
     Ok(())
 }
@@ -142,7 +136,7 @@ pub async fn run<H: Hasher>(
     futures::select! {
         _ = read_starting_round_and_run_creator(conf, &mut io, &mut starting_round).fuse() =>
             debug!(target: "AlephBFT-creator", "Creator is about to finish."),
-        _ = terminator.get_exit().fuse() =>
+        _ = terminator.wait_for_exit().fuse() =>
             debug!(target: "AlephBFT-creator", "Received an exit signal."),
     }
 
