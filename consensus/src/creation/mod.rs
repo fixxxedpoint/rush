@@ -9,6 +9,7 @@ use futures::{
         mpsc::{SendError, TrySendError},
         oneshot,
     },
+    stream::FusedStream,
     FutureExt, StreamExt,
 };
 use futures_timer::Delay;
@@ -87,6 +88,9 @@ async fn process_unit<H: Hasher>(
     creator: &mut Creator<H>,
     incoming_parents: &mut Receiver<Unit<H>>,
 ) -> anyhow::Result<(), CreatorError> {
+    if incoming_parents.is_terminated() {
+        return Err(CreatorError::ParentsChannelClosed);
+    }
     let unit = incoming_parents
         .next()
         .await
