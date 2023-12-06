@@ -367,21 +367,18 @@ impl<H: Hasher> Terminal<H> {
     pub(crate) async fn run(&mut self, mut terminator: Terminator) {
         loop {
             futures::select! {
-                n = self.ntfct_rx.next() => {
-                    match n {
-                        Some(NotificationIn::NewUnits(units)) => {
+                n = self.ntfct_rx.select_next_some() => match n {
+                        NotificationIn::NewUnits(units) => {
                             for u in units {
                                 self.add_to_store(u);
                                 self.handle_events();
                             }
                         },
-                        Some(NotificationIn::UnitParents(u_hash, p_hashes)) => {
+                        NotificationIn::UnitParents(u_hash, p_hashes) => {
                             self.update_on_wrong_hash_response(u_hash, p_hashes);
                             self.handle_events();
                         },
-                        _ => {}
-                    }
-                }
+                },
                 _ = terminator.wait_for_exit().fuse() => {
                     debug!(target: "AlephBFT-terminal", "{:?} received exit signal", self.node_id);
                     self.exiting = true;

@@ -297,12 +297,10 @@ impl<H: Hasher> Extender<H> {
     pub(crate) async fn extend(&mut self, mut terminator: Terminator) {
         loop {
             futures::select! {
-                v = self.electors.next() => {
-                    if let Some(v) = v {
-                        let v_hash = v.hash;
-                        self.add_unit(v);
-                        self.progress(v_hash)
-                    }
+                v = self.electors.select_next_some() => {
+                    let v_hash = v.hash;
+                    self.add_unit(v);
+                    self.progress(v_hash);
                 }
                 _ = terminator.wait_for_exit().fuse() => {
                     debug!(target: "AlephBFT-extender", "{:?} received exit signal.", self.node_id);

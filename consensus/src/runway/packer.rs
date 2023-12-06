@@ -3,7 +3,7 @@ use crate::{
     Data, DataProvider, Hasher, MultiKeychain, NodeIndex, Receiver, Sender, SessionId, Signed,
     Terminator,
 };
-use futures::{pin_mut, FutureExt, StreamExt};
+use futures::{FutureExt, StreamExt};
 use log::{debug, error};
 use std::marker::PhantomData;
 
@@ -82,11 +82,9 @@ where
     /// Run the main loop until receiving a signal to exit.
     pub async fn run(&mut self, mut terminator: Terminator) -> Result<(), ()> {
         debug!(target: "AlephBFT-packer", "{:?} Packer started.", self.index());
-        let pack = self.pack().fuse();
-        pin_mut!(pack);
 
         futures::select! {
-            _ = pack => Err(()),
+            _ = self.pack().fuse() => Err(()),
             _ = terminator.wait_for_exit().fuse() => {
                 terminator.terminate_sync().await;
                 Ok(())
