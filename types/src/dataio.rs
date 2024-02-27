@@ -1,6 +1,7 @@
+use aleph_bft_crypto::NodeMap;
 use async_trait::async_trait;
 
-use crate::NodeIndex;
+use crate::{NodeIndex, Hasher, Round};
 
 /// The source of data items that consensus should order.
 ///
@@ -22,4 +23,16 @@ pub trait FinalizationHandler<Data>: Sync + Send + 'static {
     /// Data, provided by [DataProvider::get_data], has been finalized.
     /// The calls to this function follow the order of finalization.
     fn data_finalized(&mut self, data: Data, creator: NodeIndex);
+}
+
+pub trait Unit<Data, H: Hasher> {
+    fn creator(&self) -> NodeIndex;
+    fn round(&self) -> Round;
+    fn data(self) -> Option<Data>;
+    fn parents(&self) -> NodeMap<H::Hash>;
+    fn hash(&self) -> H::Hash;
+}
+
+pub trait UnitFinalizationHandler<D> {
+    fn batch_ordered<H, U>(&mut self, units: impl IntoIterator<Item = U>) where H: Hasher, U: Unit<D, H>;
 }

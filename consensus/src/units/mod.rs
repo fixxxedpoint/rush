@@ -192,6 +192,28 @@ impl<H: Hasher, D: Data> Index for FullUnit<H, D> {
     }
 }
 
+impl<H: Hasher, D: Data> aleph_bft_types::Unit<D, H> for FullUnit<H, D> {
+    fn creator(&self) -> NodeIndex {
+        self.creator()
+    }
+
+    fn round(&self) -> Round {
+        self.round()
+    }
+
+    fn data(self) -> Option<D> {
+        self.data
+    }
+
+    fn parents(&self) -> NodeMap<H::Hash> {
+        self.parents()
+    }
+
+    fn hash(&self) -> H::Hash {
+        self.hash()
+    }
+}
+
 pub(crate) type UncheckedSignedUnit<H, D, S> = UncheckedSigned<FullUnit<H, D>, S>;
 
 pub(crate) type SignedUnit<H, D, K> = Signed<FullUnit<H, D>, K>;

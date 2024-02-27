@@ -6,11 +6,10 @@ use crate::{
         ControlHash, PreUnit, SignedUnit, UncheckedSignedUnit, Unit, UnitCoord, UnitStore,
         UnitStoreStatus, Validator,
     },
-    Config, Data, DataProvider, FinalizationHandler, Hasher, Index, Keychain, MultiKeychain,
-    NodeCount, NodeIndex, NodeMap, Receiver, Round, Sender, Signature, Signed, SpawnHandle,
-    Terminator, UncheckedSigned,
+    Config, Data, DataProvider, Hasher, Index, Keychain, MultiKeychain, NodeCount, NodeIndex,
+    NodeMap, Receiver, Round, Sender, Signature, Signed, SpawnHandle, Terminator, UncheckedSigned,
 };
-use aleph_bft_types::Recipient;
+use aleph_bft_types::{Recipient, UnitFinalizationHandler};
 use futures::{
     channel::{mpsc, oneshot},
     pin_mut, Future, FutureExt, StreamExt,
@@ -127,7 +126,7 @@ struct Runway<H, D, FH, MK>
 where
     H: Hasher,
     D: Data,
-    FH: FinalizationHandler<D>,
+    FH: UnitFinalizationHandler<D>,
     MK: MultiKeychain,
 {
     missing_coords: HashSet<UnitCoord>,
@@ -245,7 +244,7 @@ impl<'a, H: Hasher> fmt::Display for RunwayStatus<'a, H> {
     }
 }
 
-struct RunwayConfig<H: Hasher, D: Data, FH: FinalizationHandler<D>, MK: MultiKeychain> {
+struct RunwayConfig<H: Hasher, D: Data, FH: UnitFinalizationHandler<D>, MK: MultiKeychain> {
     max_round: Round,
     finalization_handler: FH,
     backup_units_for_saver: Sender<UncheckedSignedUnit<H, D, MK::Signature>>,
@@ -267,7 +266,7 @@ impl<H, D, FH, MK> Runway<H, D, FH, MK>
 where
     H: Hasher,
     D: Data,
-    FH: FinalizationHandler<D>,
+    FH: UnitFinalizationHandler<D>,
     MK: MultiKeychain,
 {
     fn new(config: RunwayConfig<H, D, FH, MK>, keychain: MK, validator: Validator<MK>) -> Self {
@@ -655,7 +654,7 @@ where
     }
 
     fn on_ordered_batch(&mut self, batch: Vec<H::Hash>) {
-        let data_iter: Vec<_> = batch
+        let units_batch: Vec<_> = batch
             .iter()
             .map(|h| {
                 let unit = self
@@ -664,15 +663,11 @@ where
                     .expect("Ordered units must be in store")
                     .as_signable();
 
-                (unit.data().clone(), unit.creator())
+                unit.clone()
             })
             .collect();
 
-        for (d, creator) in data_iter {
-            if let Some(d) = d {
-                self.finalization_handler.data_finalized(d, creator);
-            }
-        }
+        self.finalization_handler.batch_ordered(units_batch);
     }
 
     fn send_message_for_network(
@@ -874,7 +869,7 @@ pub struct RunwayIO<
     W: Write + Send + Sync + 'static,
     R: Read + Send + Sync + 'static,
     DP: DataProvider<D>,
-    FH: FinalizationHandler<D>,
+    FH: UnitFinalizationHandler<D>,
 > {
     pub data_provider: DP,
     pub finalization_handler: FH,
@@ -890,7 +885,7 @@ impl<
         W: Write + Send + Sync + 'static,
         R: Read + Send + Sync + 'static,
         DP: DataProvider<D>,
-        FH: FinalizationHandler<D>,
+        FH: UnitFinalizationHandler<D>,
     > RunwayIO<H, D, MK, W, R, DP, FH>
 {
     pub fn new(
@@ -922,7 +917,7 @@ pub(crate) async fn run<H, D, US, UL, MK, DP, FH, SH>(
     US: Write + Send + Sync + 'static,
     UL: Read + Send + Sync + 'static,
     DP: DataProvider<D>,
-    FH: FinalizationHandler<D>,
+    FH: UnitFinalizationHandler<D> + Send + 'static,
     MK: MultiKeychain,
     SH: SpawnHandle,
 {

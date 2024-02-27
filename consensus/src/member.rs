@@ -11,7 +11,7 @@ use crate::{
     Config, Data, DataProvider, FinalizationHandler, Hasher, MultiKeychain, Network, NodeIndex,
     Receiver, Recipient, Round, Sender, Signature, SpawnHandle, Terminator, UncheckedSigned,
 };
-use aleph_bft_types::NodeMap;
+use aleph_bft_types::{NodeMap, UnitFinalizationHandler};
 use codec::{Decode, Encode};
 use futures::{channel::mpsc, pin_mut, FutureExt, StreamExt};
 use futures_timer::Delay;
@@ -27,6 +27,37 @@ use std::{
     marker::PhantomData,
     time::Duration,
 };
+
+struct SimpleUnitFinalizationHandler<FH> {
+    finalization_handler: FH,
+}
+
+impl<FH> SimpleUnitFinalizationHandler<FH> {
+    pub fn new(finalization_handler: FH) -> Self {
+        Self {
+            finalization_handler,
+        }
+    }
+}
+
+impl<D, FH> UnitFinalizationHandler<D> for SimpleUnitFinalizationHandler<FH>
+where
+    FH: FinalizationHandler<D>,
+{
+    fn batch_ordered<H, U>(&mut self, units: impl IntoIterator<Item = U>)
+    where
+        H: Hasher,
+        U: aleph_bft_types::Unit<D, H>,
+    {
+        for unit in units {
+            let creator = unit.creator();
+            let data = unit.data();
+            if let Some(data) = data {
+                self.finalization_handler.data_finalized(data, creator);
+            }
+        }
+    }
+}
 
 /// A message concerning units, either about new units or some requests for them.
 #[derive(Clone, Eq, PartialEq, Debug, Decode, Encode)]
@@ -108,7 +139,7 @@ enum TaskDetails<H: Hasher, D: Data, S: Signature> {
 }
 
 #[derive(Clone)]
-pub struct LocalIO<D: Data, DP: DataProvider<D>, FH: FinalizationHandler<D>, US: Write, UL: Read> {
+pub struct LocalIO<D: Data, DP: DataProvider<D>, FH, US: Write, UL: Read> {
     data_provider: DP,
     finalization_handler: FH,
     unit_saver: US,
@@ -116,9 +147,7 @@ pub struct LocalIO<D: Data, DP: DataProvider<D>, FH: FinalizationHandler<D>, US:
     _phantom: PhantomData<D>,
 }
 
-impl<D: Data, DP: DataProvider<D>, FH: FinalizationHandler<D>, US: Write, UL: Read>
-    LocalIO<D, DP, FH, US, UL>
-{
+impl<D: Data, DP: DataProvider<D>, FH, US: Write, UL: Read> LocalIO<D, DP, FH, US, UL> {
     pub fn new(
         data_provider: DP,
         finalization_handler: FH,
@@ -563,16 +592,11 @@ where
     }
 }
 
-/// Starts the consensus algorithm as an async task. It stops establishing consensus for new data items after
-/// reaching the threshold specified in [`Config::max_round`] or upon receiving a stop signal from `exit`.
-/// For a detailed description of the consensus implemented by `run_session` see
-/// [docs for devs](https://cardinal-cryptography.github.io/AlephBFT/index.html)
-/// or the [original paper](https://arxiv.org/abs/1908.05156).
-pub async fn run_session<
+async fn run_session_with_unit_handler<
     H: Hasher,
     D: Data,
     DP: DataProvider<D>,
-    FH: FinalizationHandler<D>,
+    FH: UnitFinalizationHandler<D> + Send + 'static,
     US: Write + Send + Sync + 'static,
     UL: Read + Send + Sync + 'static,
     N: Network<NetworkData<H, D, MK::Signature, MK::PartialMultisignature>> + 'static,
@@ -695,6 +719,84 @@ pub async fn run_session<
     handle_task_termination(member_handle, "AlephBFT-member", "Member", index).await;
 
     info!(target: "AlephBFT-member", "{:?} Session ended.", index);
+}
+
+/// Starts the consensus algorithm as an async task. It stops establishing consensus for new data items after
+/// reaching the threshold specified in [`Config::max_round`] or upon receiving a stop signal from `exit`.
+/// For a detailed description of the consensus implemented by `run_session` see
+/// [docs for devs](https://cardinal-cryptography.github.io/AlephBFT/index.html)
+/// or the [original paper](https://arxiv.org/abs/1908.05156).
+#[cfg(not(feature = "unit_api"))]
+pub async fn run_session<
+    H: Hasher,
+    D: Data,
+    DP: DataProvider<D>,
+    FH: FinalizationHandler<D>,
+    US: Write + Send + Sync + 'static,
+    UL: Read + Send + Sync + 'static,
+    N: Network<NetworkData<H, D, MK::Signature, MK::PartialMultisignature>> + 'static,
+    SH: SpawnHandle,
+    MK: MultiKeychain,
+>(
+    config: Config,
+    local_io: LocalIO<D, DP, FH, US, UL>,
+    network: N,
+    keychain: MK,
+    spawn_handle: SH,
+    terminator: Terminator,
+) {
+    let finalization_handler = SimpleUnitFinalizationHandler::new(local_io.finalization_handler);
+    let local_io = LocalIO {
+        data_provider: local_io.data_provider,
+        finalization_handler,
+        unit_saver: local_io.unit_saver,
+        unit_loader: local_io.unit_loader,
+        _phantom: PhantomData,
+    };
+    run_session_with_unit_handler(
+        config,
+        local_io,
+        network,
+        keychain,
+        spawn_handle,
+        terminator,
+    )
+    .await
+}
+
+/// Starts the consensus algorithm as an async task. It stops establishing consensus for new data items after
+/// reaching the threshold specified in [`Config::max_round`] or upon receiving a stop signal from `exit`.
+/// For a detailed description of the consensus implemented by `run_session` see
+/// [docs for devs](https://cardinal-cryptography.github.io/AlephBFT/index.html)
+/// or the [original paper](https://arxiv.org/abs/1908.05156).
+#[cfg(feature = "unit_api")]
+pub async fn run_session<
+    H: Hasher,
+    D: Data,
+    DP: DataProvider<D>,
+    FH: UnitFinalizationHandler<D>,
+    US: Write + Send + Sync + 'static,
+    UL: Read + Send + Sync + 'static,
+    N: Network<NetworkData<H, D, MK::Signature, MK::PartialMultisignature>> + 'static,
+    SH: SpawnHandle,
+    MK: MultiKeychain,
+>(
+    config: Config,
+    local_io: LocalIO<D, DP, FH, US, UL>,
+    network: N,
+    keychain: MK,
+    spawn_handle: SH,
+    terminator: Terminator,
+) {
+    run_session_with_unit_handler(
+        config,
+        local_io,
+        network,
+        keychain,
+        spawn_handle,
+        terminator,
+    )
+    .await
 }
 
 #[cfg(test)]
