@@ -23,7 +23,10 @@ impl<H: Hasher> Extender<H> {
         }
     }
 
-    fn handle_election_result(&mut self, result: ElectionResult<H>) -> Option<Vec<H::Hash>> {
+    fn handle_election_result(
+        &mut self,
+        result: ElectionResult<H>,
+    ) -> Option<Vec<ExtenderUnit<H>>> {
         use ElectionResult::*;
         match result {
             // Wait for more voters for this election.
@@ -40,7 +43,7 @@ impl<H: Hasher> Extender<H> {
     }
 
     /// Add a unit to the extender. Might return several batches of ordered units as a result.
-    pub fn add_unit(&mut self, u: ExtenderUnit<H>) -> Vec<Vec<H::Hash>> {
+    pub fn add_unit(&mut self, u: ExtenderUnit<H>) -> Vec<Vec<ExtenderUnit<H>>> {
         let hash = u.hash;
         self.units.add_unit(u);
         let unit = self.units.get(&hash).expect("just added");

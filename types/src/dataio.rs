@@ -25,11 +25,11 @@ pub trait FinalizationHandler<Data>: Sync + Send + 'static {
     fn data_finalized(&mut self, data: Data, creator: NodeIndex);
 }
 
-pub trait Unit<Data, H: Hasher> {
+pub trait Unit<Data, H: Hasher>: Into<Option<Data>> {
     fn creator(&self) -> NodeIndex;
     fn round(&self) -> Round;
-    fn data(self) -> Option<Data>;
-    fn parents(&self) -> NodeMap<H::Hash>;
+    fn data(&self) -> &Option<Data>;
+    fn parents(&self) -> &NodeMap<H::Hash>;
     fn hash(&self) -> H::Hash;
 }
 

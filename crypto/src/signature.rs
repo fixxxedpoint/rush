@@ -175,13 +175,22 @@ impl<T: Signable, S: Signature> From<UncheckedSigned<Indexed<T>, S>> for Uncheck
 }
 
 /// A correctly signed object of type `T`.
-///
-/// The correctness is guaranteed by storing a (phantom) reference to the `Keychain` that verified
-/// the signature.
 #[derive(Eq, PartialEq, Hash, Debug, Decode, Encode)]
 pub struct Signed<T: Signable + Index, K: Keychain> {
     unchecked: UncheckedSigned<T, K::Signature>,
 }
+
+// impl<D, T: Signable + Index + Into<D>, K: Keychain> Into<D> for Signed<T, K> {
+//     fn into(self) -> D {
+//         self.into_signable().into()
+//     }
+// }
+
+// impl<H: Hasher, D: Data, K: Keychain> Into<Option<D>> for Signed<FullUnit<H, D>, K> {
+//     fn into(self) -> Option<D> {
+//         self.into_signable().data
+//     }
+// }
 
 impl<T: Signable + Clone + Index, K: Keychain> Clone for Signed<T, K> {
     fn clone(&self) -> Self {

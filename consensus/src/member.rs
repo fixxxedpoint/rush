@@ -51,7 +51,7 @@ where
     {
         for unit in units {
             let creator = unit.creator();
-            let data = unit.data();
+            let data = unit.into();
             if let Some(data) = data {
                 self.finalization_handler.data_finalized(data, creator);
             }

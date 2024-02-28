@@ -1,5 +1,6 @@
 use crate::{
     consensus,
+    extension::ExtenderUnit,
     runway::{NotificationIn, NotificationOut},
     testing::{complete_oneshot, gen_config, gen_delay_config},
     units::{ControlHash, PreUnit, Unit},
@@ -123,7 +124,7 @@ async fn run_consensus_on_dag(
     units: Vec<UnitWithParents>,
     n_members: NodeCount,
     deadline_ms: u64,
-) -> Vec<Vec<Hash64>> {
+) -> Vec<Vec<ExtenderUnit<Hasher64>>> {
     let (feeder, rx_in, tx_out) = ConsensusDagFeeder::new(units);
     let conf = gen_config(NodeIndex(0), n_members, gen_delay_config());
     let (_exit_tx, exit_rx) = oneshot::channel();
@@ -263,9 +264,16 @@ fn generate_random_dag(n_members: NodeCount, height: Round, seed: u64) -> Vec<Un
     dag_units
 }
 
-fn batch_lists_consistent(batches1: &[Vec<Hash64>], batches2: &[Vec<Hash64>]) -> bool {
+fn batch_lists_consistent(
+    batches1: &[Vec<ExtenderUnit<Hasher64>>],
+    batches2: &[Vec<ExtenderUnit<Hasher64>>],
+) -> bool {
     for i in 0..cmp::min(batches1.len(), batches2.len()) {
-        if batches1[i] != batches2[i] {
+        if !batches1[i]
+            .iter()
+            .map(|u| u.hash())
+            .eq(batches2[i].iter().map(|u| u.hash()))
+        {
             return false;
         }
     }

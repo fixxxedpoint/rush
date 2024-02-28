@@ -52,7 +52,7 @@ impl<H: Hasher> Units<H> {
     }
 
     /// Remove a batch of units, deterministically ordered based on the given head.
-    pub fn remove_batch(&mut self, head: H::Hash) -> Vec<H::Hash> {
+    pub fn remove_batch(&mut self, head: H::Hash) -> Vec<ExtenderUnit<H>> {
         let mut batch = Vec::new();
         let mut queue = VecDeque::new();
         queue.push_back(
@@ -61,12 +61,12 @@ impl<H: Hasher> Units<H> {
                 .expect("head is picked among units we have"),
         );
         while let Some(u) = queue.pop_front() {
-            batch.push(u.hash);
-            for u_hash in u.parents.into_values() {
-                if let Some(v) = self.units.remove(&u_hash) {
+            for u_hash in u.parents.values() {
+                if let Some(v) = self.units.remove(u_hash) {
                     queue.push_back(v);
                 }
             }
+            batch.push(u);
         }
         // Since we construct the batch using BFS, the ordering is canonical and respects the DAG partial order.
 
@@ -121,7 +121,7 @@ mod test {
         assert_eq!(units.in_round(max_round + 1), None);
         for head in heads {
             let mut batch = units.remove_batch(head);
-            assert_eq!(batch.pop(), Some(head));
+            assert_eq!(batch.pop().map(|u| u.hash), Some(head));
         }
     }
 

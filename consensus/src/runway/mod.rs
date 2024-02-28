@@ -1,10 +1,12 @@
 use crate::{
     alerts::{Alert, ForkProof, ForkingNotification, NetworkMessage},
-    consensus, handle_task_termination,
+    consensus,
+    extension::ExtenderUnit,
+    handle_task_termination,
     member::UnitMessage,
     units::{
         ControlHash, PreUnit, SignedUnit, UncheckedSignedUnit, Unit, UnitCoord, UnitStore,
-        UnitStoreStatus, Validator,
+        UnitStoreStatus, UnitWithParents, Validator,
     },
     Config, Data, DataProvider, Hasher, Index, Keychain, MultiKeychain, NodeCount, NodeIndex,
     NodeMap, Receiver, Round, Sender, Signature, Signed, SpawnHandle, Terminator, UncheckedSigned,
@@ -142,7 +144,8 @@ where
     resolved_requests: Sender<Request<H>>,
     tx_consensus: Sender<NotificationIn<H>>,
     rx_consensus: Receiver<NotificationOut<H>>,
-    ordered_batch_rx: Receiver<Vec<H::Hash>>,
+    // TODO we probably should receive here units with decoded parents
+    ordered_batch_rx: Receiver<Vec<ExtenderUnit<H>>>,
     finalization_handler: FH,
     backup_units_for_saver: Sender<UncheckedSignedUnit<H, D, MK::Signature>>,
     backup_units_from_saver: Receiver<UncheckedSignedUnit<H, D, MK::Signature>>,
@@ -256,7 +259,7 @@ struct RunwayConfig<H: Hasher, D: Data, FH: UnitFinalizationHandler<D>, MK: Mult
     unit_messages_from_network: Receiver<RunwayNotificationIn<H, D, MK::Signature>>,
     unit_messages_for_network: Sender<RunwayNotificationOut<H, D, MK::Signature>>,
     responses_for_collection: Sender<CollectionResponse<H, D, MK>>,
-    ordered_batch_rx: Receiver<Vec<H::Hash>>,
+    ordered_batch_rx: Receiver<Vec<ExtenderUnit<H>>>,
     resolved_requests: Sender<Request<H>>,
     preunits_for_packer: Sender<PreUnit<H>>,
     signed_units_from_packer: Receiver<SignedUnit<H, D, MK>>,
@@ -653,19 +656,15 @@ where
         }
     }
 
-    fn on_ordered_batch(&mut self, batch: Vec<H::Hash>) {
-        let units_batch: Vec<_> = batch
-            .iter()
-            .map(|h| {
-                let unit = self
-                    .store
-                    .unit_by_hash(h)
-                    .expect("Ordered units must be in store")
-                    .as_signable();
+    fn on_ordered_batch(&mut self, batch: Vec<ExtenderUnit<H>>) {
+        let units_batch = batch.into_iter().map(|u| {
+            let unit = self
+                .store
+                .unit_by_hash(u.hash())
+                .expect("Ordered units must be in store");
 
-                unit.clone()
-            })
-            .collect();
+            UnitWithParents::new(unit.clone(), u.parents())
+        });
 
         self.finalization_handler.batch_ordered(units_batch);
     }

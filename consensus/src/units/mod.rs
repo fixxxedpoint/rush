@@ -58,15 +58,15 @@ impl<H: Hasher> ControlHash<H> {
         parent_map.using_encoded(H::hash)
     }
 
-    pub(crate) fn parents(&self) -> impl Iterator<Item = NodeIndex> + '_ {
+    pub fn parents(&self) -> impl Iterator<Item = NodeIndex> + '_ {
         self.parents_mask.elements()
     }
 
-    pub(crate) fn n_parents(&self) -> NodeCount {
+    pub fn n_parents(&self) -> NodeCount {
         NodeCount(self.parents().count())
     }
 
-    pub(crate) fn n_members(&self) -> NodeCount {
+    pub fn n_members(&self) -> NodeCount {
         NodeCount(self.parents_mask.size())
     }
 }
@@ -86,23 +86,23 @@ impl<H: Hasher> PreUnit<H> {
         }
     }
 
-    pub(crate) fn n_parents(&self) -> NodeCount {
+    pub fn n_parents(&self) -> NodeCount {
         self.control_hash.n_parents()
     }
 
-    pub(crate) fn n_members(&self) -> NodeCount {
+    pub fn n_members(&self) -> NodeCount {
         self.control_hash.n_members()
     }
 
-    pub(crate) fn creator(&self) -> NodeIndex {
+    pub fn creator(&self) -> NodeIndex {
         self.coord.creator()
     }
 
-    pub(crate) fn round(&self) -> Round {
+    pub fn round(&self) -> Round {
         self.coord.round()
     }
 
-    pub(crate) fn control_hash(&self) -> &ControlHash<H> {
+    pub fn control_hash(&self) -> &ControlHash<H> {
         &self.control_hash
     }
 }
@@ -139,31 +139,31 @@ impl<H: Hasher, D: Data> FullUnit<H, D> {
             hash: RwLock::new(None),
         }
     }
-    pub(crate) fn as_pre_unit(&self) -> &PreUnit<H> {
+    pub fn as_pre_unit(&self) -> &PreUnit<H> {
         &self.pre_unit
     }
-    pub(crate) fn creator(&self) -> NodeIndex {
+    pub fn creator(&self) -> NodeIndex {
         self.pre_unit.creator()
     }
-    pub(crate) fn round(&self) -> Round {
+    pub fn round(&self) -> Round {
         self.pre_unit.round()
     }
-    pub(crate) fn control_hash(&self) -> &ControlHash<H> {
+    pub fn control_hash(&self) -> &ControlHash<H> {
         self.pre_unit.control_hash()
     }
-    pub(crate) fn coord(&self) -> UnitCoord {
+    pub fn coord(&self) -> UnitCoord {
         self.pre_unit.coord
     }
-    pub(crate) fn data(&self) -> &Option<D> {
+    pub fn data(&self) -> &Option<D> {
         &self.data
     }
-    pub(crate) fn included_data(&self) -> Vec<D> {
+    pub fn included_data(&self) -> Vec<D> {
         self.data.iter().cloned().collect()
     }
-    pub(crate) fn session_id(&self) -> SessionId {
+    pub fn session_id(&self) -> SessionId {
         self.session_id
     }
-    pub(crate) fn hash(&self) -> H::Hash {
+    pub fn hash(&self) -> H::Hash {
         let hash = *self.hash.read();
         match hash {
             Some(hash) => hash,
@@ -174,7 +174,7 @@ impl<H: Hasher, D: Data> FullUnit<H, D> {
             }
         }
     }
-    pub(crate) fn unit(&self) -> Unit<H> {
+    pub fn unit(&self) -> Unit<H> {
         Unit::new(self.pre_unit.clone(), self.hash())
     }
 }
@@ -192,31 +192,74 @@ impl<H: Hasher, D: Data> Index for FullUnit<H, D> {
     }
 }
 
-impl<H: Hasher, D: Data> aleph_bft_types::Unit<D, H> for FullUnit<H, D> {
-    fn creator(&self) -> NodeIndex {
-        self.creator()
-    }
+// impl<H: Hasher, D: Data> aleph_bft_types::Unit<D, H> for FullUnit<H, D> {
+//     fn creator(&self) -> NodeIndex {
+//         self.creator()
+//     }
 
-    fn round(&self) -> Round {
-        self.round()
-    }
+//     fn round(&self) -> Round {
+//         self.round()
+//     }
 
-    fn data(self) -> Option<D> {
-        self.data
-    }
+//     fn data(self) -> Option<D> {
+//         self.data
+//     }
 
-    fn parents(&self) -> NodeMap<H::Hash> {
-        self.parents()
-    }
+//     fn parents(&self) -> NodeMap<H::Hash> {
+//         Unit::parents(self)
+//     }
 
-    fn hash(&self) -> H::Hash {
-        self.hash()
-    }
-}
+//     fn hash(&self) -> H::Hash {
+//         self.hash()
+//     }
+// }
 
 pub(crate) type UncheckedSignedUnit<H, D, S> = UncheckedSigned<FullUnit<H, D>, S>;
 
-pub(crate) type SignedUnit<H, D, K> = Signed<FullUnit<H, D>, K>;
+pub type SignedUnit<H, D, K> = Signed<FullUnit<H, D>, K>;
+
+pub struct UnitWithParents<Unit, Hash> {
+    unit: Unit,
+    parents: NodeMap<Hash>,
+}
+impl<Unit, Hash> UnitWithParents<Unit, Hash> {
+    pub fn new(unit: Unit, parents: NodeMap<Hash>) -> Self {
+        Self { unit, parents }
+    }
+}
+
+impl<Data: crate::Data, Hasher: crate::Hasher, Keychain: crate::Keychain>
+    aleph_bft_types::Unit<Data, Hasher>
+    for UnitWithParents<SignedUnit<Hasher, Data, Keychain>, Hasher::Hash>
+{
+    fn creator(&self) -> NodeIndex {
+        self.unit.as_signable().creator()
+    }
+
+    fn round(&self) -> Round {
+        self.unit.as_signable().round()
+    }
+
+    fn data(&self) -> &Option<Data> {
+        self.unit.as_signable().data()
+    }
+
+    fn parents(&self) -> &NodeMap<Hasher::Hash> {
+        &self.parents
+    }
+
+    fn hash(&self) -> Hasher::Hash {
+        self.unit.as_signable().hash()
+    }
+}
+
+impl<Hasher: crate::Hasher, Data: crate::Data, Keychain: crate::Keychain> Into<Option<Data>>
+    for UnitWithParents<SignedUnit<Hasher, Data, Keychain>, Hasher::Hash>
+{
+    fn into(self) -> Option<Data> {
+        self.unit.into_signable().data
+    }
+}
 
 #[derive(Clone, Eq, PartialEq, Debug, Decode, Encode)]
 pub struct Unit<H: Hasher> {
@@ -241,6 +284,28 @@ impl<H: Hasher> Unit<H> {
         self.hash
     }
 }
+
+// impl<H, D, K> aleph_bft_types::Unit<D, H> for SignedUnit<H, D, K> {
+//     fn creator(&self) -> NodeIndex {
+//         todo!()
+//     }
+
+//     fn round(&self) -> Round {
+//         todo!()
+//     }
+
+//     fn data(self) -> Option<Data> {
+//         todo!()
+//     }
+
+//     fn parents(&self) -> NodeMap<H::Hash> {
+//         todo!()
+//     }
+
+//     fn hash(&self) -> H::Hash {
+//         todo!()
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
