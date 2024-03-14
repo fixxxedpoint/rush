@@ -107,13 +107,7 @@ enum TaskDetails<H: Hasher, D: Data, S: Signature> {
 }
 
 #[derive(Clone)]
-pub struct LocalIO<
-    D: Data,
-    DP: DataProvider<D>,
-    FH: FinalizationHandler<D>,
-    US: AsyncWrite,
-    UL: AsyncRead,
-> {
+pub struct LocalIO<D: Data, DP: DataProvider<D>, FH, US: AsyncWrite, UL: AsyncRead> {
     data_provider: DP,
     finalization_handler: FH,
     unit_saver: US,
@@ -121,9 +115,7 @@ pub struct LocalIO<
     _phantom: PhantomData<D>,
 }
 
-impl<D: Data, DP: DataProvider<D>, FH: FinalizationHandler<D>, US: AsyncWrite, UL: AsyncRead>
-    LocalIO<D, DP, FH, US, UL>
-{
+impl<D: Data, DP: DataProvider<D>, FH, US: AsyncWrite, UL: AsyncRead> LocalIO<D, DP, FH, US, UL> {
     pub fn new(
         data_provider: DP,
         finalization_handler: FH,
@@ -577,7 +569,7 @@ pub async fn run_session<
     H: Hasher,
     D: Data,
     DP: DataProvider<D>,
-    FH: FinalizationHandler<D>,
+    FH: FinalizationHandler<D, H::Hash>,
     US: AsyncWrite + Send + Sync + 'static,
     UL: AsyncRead + Send + Sync + 'static,
     N: Network<NetworkData<H, D, MK::Signature, MK::PartialMultisignature>> + 'static,

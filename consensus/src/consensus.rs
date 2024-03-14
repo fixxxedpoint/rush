@@ -8,7 +8,7 @@ use log::{debug, error};
 use crate::{
     config::Config,
     creation,
-    extension::Service as Extender,
+    extension::{ExtenderUnit, Service as Extender},
     handle_task_termination,
     reconstruction::Service as ReconstructionService,
     runway::{NotificationIn, NotificationOut},
@@ -19,7 +19,7 @@ pub(crate) async fn run<H: Hasher + 'static>(
     conf: Config,
     incoming_notifications: Receiver<NotificationIn<H>>,
     outgoing_notifications: Sender<NotificationOut<H>>,
-    ordered_batch_tx: Sender<Vec<H::Hash>>,
+    ordered_batch_tx: Sender<Vec<ExtenderUnit<H>>>,
     spawn_handle: impl SpawnHandle,
     starting_round: oneshot::Receiver<Option<Round>>,
     mut terminator: Terminator,

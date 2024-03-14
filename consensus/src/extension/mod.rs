@@ -31,6 +31,18 @@ impl<H: Hasher> ExtenderUnit<H> {
     }
 }
 
+impl<'a, H: Hasher> From<&'a ExtenderUnit<H>> for (&'a H::Hash, &'a NodeMap<H::Hash>) {
+    fn from(value: &'a ExtenderUnit<H>) -> Self {
+        (&value.hash, &value.parents)
+    }
+}
+
+impl<H: Hasher> From<ExtenderUnit<H>> for (H::Hash, NodeMap<H::Hash>) {
+    fn from(value: ExtenderUnit<H>) -> Self {
+        (value.hash, value.parents)
+    }
+}
+
 /// A process responsible for executing the Consensus protocol on a local copy of the Dag.
 /// It receives units via a channel `electors` which are guaranteed to be eventually in the Dags
 /// of all honest nodes. The static Aleph Consensus algorithm is then run on this Dag in order
@@ -46,14 +58,14 @@ pub struct Service<H: Hasher> {
     node_id: NodeIndex,
     extender: Extender<H>,
     electors: Receiver<ExtenderUnit<H>>,
-    finalizer_tx: Sender<Vec<H::Hash>>,
+    finalizer_tx: Sender<Vec<ExtenderUnit<H>>>,
 }
 
 impl<H: Hasher> Service<H> {
     pub fn new(
         node_id: NodeIndex,
         electors: Receiver<ExtenderUnit<H>>,
-        finalizer_tx: Sender<Vec<H::Hash>>,
+        finalizer_tx: Sender<Vec<ExtenderUnit<H>>>,
     ) -> Self {
         let extender = Extender::new();
         Service {
@@ -73,7 +85,7 @@ impl<H: Hasher> Service<H> {
                     Some(u) => {
                         debug!(target: LOG_TARGET, "{:?} New unit in Extender round {:?} creator {:?} hash {:?}.", self.node_id, u.round, u.creator, u.hash);
                         for batch in self.extender.add_unit(u) {
-                            let head = *batch.last().expect("all batches are nonempty");
+                            let head = batch.last().expect("all batches are nonempty").hash;
                             if self.finalizer_tx.unbounded_send(batch).is_err() {
                                 warn!(target: LOG_TARGET, "{:?} Channel for batches should be open", self.node_id);
                                 exiting = true;
