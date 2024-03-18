@@ -61,7 +61,7 @@ impl<Data, Hash> From<OrderedUnit<Data, Hash>> for Option<Data> {
 pub trait FinalizationHandler<Data, Hash>: Sync + Send + 'static {
     /// Data, provided by [DataProvider::get_data], has been finalized.
     /// The calls to this function follow the order of finalization.
-    fn data_finalized(&mut self, _data: Data, _creator: NodeIndex) {}
+    fn data_finalized(&mut self, _data: Data) {}
 
     /// A batch of units has been finalized. You can overwrite the default implementation for more advanced finalization
     /// handling in which case the method [`FinalizationHandler::data_finalized`] will not be called anymore if a unit is
@@ -70,10 +70,9 @@ pub trait FinalizationHandler<Data, Hash>: Sync + Send + 'static {
     /// are doing.
     fn batch_finalized(&mut self, batch: Vec<OrderedUnit<Data, Hash>>) {
         for unit in batch {
-            let creator = unit.creator;
             let data = unit.into();
             if let Some(data) = data {
-                self.data_finalized(data, creator);
+                self.data_finalized(data);
             }
         }
     }
